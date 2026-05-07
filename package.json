@@ -1,0 +1,104 @@
+{
+  "name": "cursor-code-review-helper",
+  "displayName": "Cursor Code Review Helper",
+  "description": "Collect code review comments into pending/review batches and copy them for sharing.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:codeReviewSidebar",
+    "onCommand:codeReview.addComment",
+    "onCommand:codeReview.openSidebar",
+    "onCommand:codeReview.clearPending",
+    "onCommand:codeReview.sendForReview"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codeReviewContainer",
+          "title": "Code Review",
+          "icon": "media/review.svg"
+        }
+      ]
+    },
+    "views": {
+      "codeReviewContainer": [
+        {
+          "id": "codeReviewSidebar",
+          "name": "Code Review Notes",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codeReview.addComment",
+        "title": "Code Review: Add Comment Here"
+      },
+      {
+        "command": "codeReview.openSidebar",
+        "title": "Code Review: Open Sidebar"
+      },
+      {
+        "command": "codeReview.clearPending",
+        "title": "Code Review: Clear Pending"
+      },
+      {
+        "command": "codeReview.sendForReview",
+        "title": "Code Review: Send for Review"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codeReview.addComment",
+          "group": "navigation@100"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "codeReview.openSidebar",
+          "when": "view == codeReviewSidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "codeReview.sendForReview",
+          "when": "view == codeReviewSidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "codeReview.clearPending",
+          "when": "view == codeReviewSidebar",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "codeReview.addComment",
+        "key": "cmd+alt+r",
+        "mac": "cmd+alt+r",
+        "linux": "ctrl+alt+r",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.9.1",
+    "typescript": "^5.4.5"
+  }
+}
