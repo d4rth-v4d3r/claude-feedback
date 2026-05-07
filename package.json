@@ -1,8 +1,8 @@
 {
   "name": "cursor-code-review-helper",
   "displayName": "Cursor Code Review Helper",
-  "description": "Collect code review comments into pending/review batches, then send to Claude Code via the integrated terminal.",
-  "version": "0.0.20",
+  "description": "Native PR-style review threads in the editor and a tree view of pending comments per repo/worktree, sent to Claude Code with one click.",
+  "version": "0.0.25",
   "publisher": "local",
   "engines": {
     "vscode": "^1.98.0"
@@ -11,15 +11,48 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:codeReviewSidebar",
+    "onView:codeReviewPending",
+    "onView:codeReviewResolved",
     "onCommand:codeReview.addComment",
     "onCommand:codeReview.openSidebar",
     "onCommand:codeReview.clearPending",
     "onCommand:codeReview.sendForReview",
-    "onCommand:codeReview.sendInCurrentTerminal"
+    "onCommand:codeReview.sendInCurrentTerminal",
+    "onCommand:codeReview.openFileDiff",
+    "onCommand:codeReview.setParentBranch",
+    "onCommand:codeReview.quickReviewMenu"
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "Code Review",
+      "properties": {
+        "codeReview.claudeTerminalLocation": {
+          "type": "string",
+          "enum": [
+            "panel",
+            "editor"
+          ],
+          "enumDescriptions": [
+            "Bottom terminal panel.",
+            "Editor area, as a new tab in the same editor group as the active file (stacked tabs — avoids opening side-by-side with your file)."
+          ],
+          "default": "editor",
+          "description": "Where to open the terminal when launching Claude for a code-review batch."
+        },
+        "codeReview.parentBranch": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Fallback parent branch for the diff view (e.g. main, origin/main). Per-branch overrides via `git config branch.<name>.codeReviewParent` always win, and Graphite's `gtParentBranchName` is auto-detected. Leave empty to use origin/HEAD."
+        },
+        "codeReview.showInlinePending": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show pending comments in the editor: gutter marker, line highlight, and end-of-line preview (in addition to the native comment thread)."
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -32,9 +65,14 @@
     "views": {
       "codeReviewContainer": [
         {
-          "id": "codeReviewSidebar",
-          "name": "Code Review Notes",
-          "type": "webview"
+          "id": "codeReviewPending",
+          "name": "Pending",
+          "type": "tree"
+        },
+        {
+          "id": "codeReviewResolved",
+          "name": "Resolved Batches",
+          "type": "tree"
         }
       ]
     },
@@ -44,51 +82,178 @@
         "title": "Code Review: Add Comment Here"
       },
       {
+        "command": "codeReview.quickReviewMenu",
+        "title": "Code Review: Quick Menu…"
+      },
+      {
         "command": "codeReview.openSidebar",
         "title": "Code Review: Open Sidebar"
       },
       {
+        "command": "codeReview.openFileDiff",
+        "title": "Code Review: Open Diff vs Parent Branch",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "codeReview.setParentBranch",
+        "title": "Code Review: Set Parent Branch for Current Branch…",
+        "icon": "$(git-branch)"
+      },
+      {
         "command": "codeReview.clearPending",
-        "title": "Code Review: Clear Pending"
+        "title": "Code Review: Clear Pending",
+        "icon": "$(trash)"
       },
       {
         "command": "codeReview.sendForReview",
-        "title": "Code Review: Open Claude Terminal & Send",
-        "icon": "$(terminal)"
+        "title": "Code Review: Send for review",
+        "icon": "$(claude)"
       },
       {
         "command": "codeReview.sendInCurrentTerminal",
         "title": "Code Review: Send in Current Terminal",
         "icon": "$(terminal)"
+      },
+      {
+        "command": "codeReview.replyComment",
+        "title": "Reply",
+        "icon": "$(send)"
+      },
+      {
+        "command": "codeReview.editComment",
+        "title": "Edit",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "codeReview.deleteComment",
+        "title": "Delete",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "codeReview.deleteThread",
+        "title": "Delete thread",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "codeReview.toggleResolved",
+        "title": "Toggle Resolved",
+        "icon": "$(check)"
+      },
+      {
+        "command": "codeReview.rollbackBatch",
+        "title": "Rollback batch",
+        "icon": "$(discard)"
+      }
+    ],
+    "submenus": [
+      {
+        "id": "codeReview.editor",
+        "label": "Code Review"
       }
     ],
     "menus": {
       "editor/context": [
         {
+          "submenu": "codeReview.editor",
+          "group": "codeReview@10"
+        }
+      ],
+      "codeReview.editor": [
+        {
+          "command": "codeReview.quickReviewMenu",
+          "group": "1_actions@10"
+        },
+        {
           "command": "codeReview.addComment",
-          "group": "navigation@100"
+          "group": "1_actions@20"
+        },
+        {
+          "command": "codeReview.openFileDiff",
+          "group": "1_actions@30"
+        },
+        {
+          "command": "codeReview.openSidebar",
+          "group": "2_nav@40"
         }
       ],
       "view/title": [
         {
-          "command": "codeReview.openSidebar",
-          "when": "view == codeReviewSidebar",
-          "group": "navigation"
-        },
-        {
           "command": "codeReview.sendForReview",
-          "when": "view == codeReviewSidebar",
-          "group": "navigation"
+          "when": "view == codeReviewPending",
+          "group": "navigation@10"
         },
         {
           "command": "codeReview.sendInCurrentTerminal",
-          "when": "view == codeReviewSidebar",
-          "group": "navigation"
+          "when": "view == codeReviewPending",
+          "group": "navigation@20"
         },
         {
           "command": "codeReview.clearPending",
-          "when": "view == codeReviewSidebar",
-          "group": "navigation"
+          "when": "view == codeReviewPending",
+          "group": "navigation@30"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "codeReview.sendForReview",
+          "when": "view == codeReviewPending && viewItem =~ /codeReview\\.worktree/",
+          "group": "inline@10"
+        },
+        {
+          "command": "codeReview.sendInCurrentTerminal",
+          "when": "view == codeReviewPending && viewItem =~ /codeReview\\.worktree/",
+          "group": "inline@20"
+        },
+        {
+          "command": "codeReview.clearPending",
+          "when": "view == codeReviewPending && viewItem =~ /codeReview\\.worktree/",
+          "group": "inline@30"
+        },
+        {
+          "command": "codeReview.setParentBranch",
+          "when": "view == codeReviewPending && viewItem =~ /codeReview\\.worktree/",
+          "group": "1_config@10"
+        },
+        {
+          "command": "codeReview.openFileDiff",
+          "when": "view == codeReviewPending && viewItem == codeReview.file",
+          "group": "inline@10"
+        },
+        {
+          "command": "codeReview.rollbackBatch",
+          "when": "view == codeReviewResolved && viewItem == codeReview.batch",
+          "group": "inline@10"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "codeReview.replyComment",
+          "group": "inline@1",
+          "when": "commentController == codeReview.comments"
+        }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "codeReview.toggleResolved",
+          "group": "inline@1",
+          "when": "commentController == codeReview.comments"
+        },
+        {
+          "command": "codeReview.deleteThread",
+          "group": "inline@2",
+          "when": "commentController == codeReview.comments"
+        }
+      ],
+      "comments/comment/title": [
+        {
+          "command": "codeReview.editComment",
+          "group": "inline@1",
+          "when": "commentController == codeReview.comments && comment == codeReview.pending"
+        },
+        {
+          "command": "codeReview.deleteComment",
+          "group": "inline@2",
+          "when": "commentController == codeReview.comments && comment == codeReview.pending"
         }
       ]
     },
