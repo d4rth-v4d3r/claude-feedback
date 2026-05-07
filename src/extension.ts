@@ -320,6 +320,8 @@ function getWebviewHtml(webview: vscode.Webview): string {
       border-radius: 8px;
       padding: 10px;
       background: var(--vscode-sideBar-background);
+      max-width: 100%;
+      overflow: hidden;
     }
     .meta {
       display: flex;
@@ -338,6 +340,8 @@ function getWebviewHtml(webview: vscode.Webview): string {
     .comment {
       margin-bottom: 8px;
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     .code {
       margin: 0;
