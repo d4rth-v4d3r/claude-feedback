@@ -322,7 +322,8 @@ function getWebviewHtml(webview) {
     }
     .tabs {
       display: flex;
-      border-bottom: 1px solid var(--vscode-panel-border);
+      gap: 4px;
+      padding: 8px 8px 0;
       position: sticky;
       top: 0;
       background: var(--vscode-editor-background);
@@ -333,12 +334,15 @@ function getWebviewHtml(webview) {
       border: 0;
       background: transparent;
       color: var(--vscode-foreground);
-      padding: 10px 8px;
+      padding: 8px 8px;
       cursor: pointer;
       font-weight: 600;
+      border-top-left-radius: 8px;
+      border-top-right-radius: 8px;
     }
     .tab.active {
-      border-bottom: 2px solid var(--vscode-focusBorder);
+      background: color-mix(in srgb, var(--vscode-focusBorder) 16%, transparent);
+      box-shadow: inset 0 -2px 0 var(--vscode-focusBorder);
     }
     .list {
       padding: 10px;
@@ -365,7 +369,6 @@ function getWebviewHtml(webview) {
     .path-link {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
       margin-bottom: 8px;
       font-family: var(--vscode-editor-font-family);
       font-size: 12px;
@@ -378,6 +381,22 @@ function getWebviewHtml(webview) {
     .path-link:hover {
       color: var(--vscode-textLink-activeForeground);
       text-decoration: underline;
+    }
+    .path-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .icon-btn {
+      border: 1px solid var(--vscode-button-border, transparent);
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+      border-radius: 6px;
+      padding: 2px 8px;
+      min-width: 0;
+      line-height: 1.2;
     }
     .comment {
       margin-bottom: 8px;
@@ -460,20 +479,18 @@ function getWebviewHtml(webview) {
       font-family: var(--vscode-font-family);
       font-size: 12px;
     }
-    .tree-group {
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 8px;
-      overflow: hidden;
-      background: var(--vscode-sideBar-background);
+    .tree-node {
+      display: grid;
+      gap: 6px;
     }
-    .tree-summary {
+    .tree-row {
       width: 100%;
       border: 0;
       background: transparent;
       color: var(--vscode-foreground);
       text-align: left;
       font-weight: 600;
-      padding: 10px;
+      padding: 2px 0;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -481,8 +498,10 @@ function getWebviewHtml(webview) {
       cursor: pointer;
     }
     .tree-children {
-      border-top: 1px solid var(--vscode-panel-border);
-      padding: 8px;
+      display: grid;
+      gap: 8px;
+    }
+    .tree-comments {
       display: grid;
       gap: 8px;
     }
@@ -496,12 +515,20 @@ function getWebviewHtml(webview) {
       opacity: 0.9;
       white-space: nowrap;
     }
+    .code-line {
+      display: block;
+      white-space: pre;
+    }
+    .code-line-active {
+      color: var(--vscode-editorInfo-foreground);
+      font-weight: 600;
+    }
   </style>
 </head>
 <body>
   <div class="tabs">
     <button class="tab active" id="tab-pending">Pending</button>
-    <button class="tab" id="tab-reviews">Reviews</button>
+    <button class="tab" id="tab-reviews">Resolved</button>
   </div>
   <section id="pending-list" class="list"></section>
   <section id="reviews-list" class="list hidden"></section>
@@ -555,8 +582,8 @@ function getWebviewHtml(webview) {
         const repoKey = repoGroup.repoName;
         const repoOpen = state.expandedRepos[repoKey] ?? true;
         return \`
-          <section class="tree-group">
-            <button class="tree-summary" data-toggle-repo="\${escapeHtml(repoKey)}">
+          <section class="tree-node">
+            <button class="tree-row" data-toggle-repo="\${escapeHtml(repoKey)}">
               <span>\${repoOpen ? "▾" : "▸"} \${escapeHtml(repoGroup.repoName)}</span>
               <span class="badge">\${repoGroup.count} comment(s)</span>
             </button>
@@ -565,12 +592,12 @@ function getWebviewHtml(webview) {
                 const worktreeKey = \`\${repoKey}::\${worktreeGroup.worktreeName}\`;
                 const worktreeOpen = state.expandedWorktrees[worktreeKey] ?? true;
                 return \`
-                  <section class="tree-group">
-                    <button class="tree-summary" data-toggle-worktree="\${escapeHtml(worktreeKey)}">
+                  <section class="tree-node">
+                    <button class="tree-row" data-toggle-worktree="\${escapeHtml(worktreeKey)}">
                       <span>\${worktreeOpen ? "▾" : "▸"} \${escapeHtml(worktreeGroup.worktreeName)}</span>
                       <span class="badge">\${escapeHtml(worktreeGroup.branchName)}</span>
                     </button>
-                    <div class="\${worktreeOpen ? "tree-children" : "hidden"}">
+                    <div class="\${worktreeOpen ? "tree-comments" : "hidden"}">
                       \${worktreeGroup.comments.map((comment) => renderCommentCard(comment)).join("")}
                     </div>
                   </section>
@@ -629,15 +656,12 @@ function getWebviewHtml(webview) {
             <span>L\${comment.line}</span>
             <span>\${new Date(comment.createdAt).toLocaleString()}</span>
           </div>
-          <a class="path-link" data-open="\${comment.id}">
-            <span>✎</span>
-            <span>\${escapeHtml(comment.relativePath)}:\${comment.line}</span>
-          </a>
-          <div class="comment">\${escapeHtml(comment.comment)}</div>
-          <pre class="code">\${escapeHtml(comment.context.join("\\n"))}</pre>
-          <div class="actions">
-            <button data-edit="\${comment.id}">\${isEditing ? "Close" : "Edit"}</button>
+          <div class="path-row">
+            <a class="path-link" data-open="\${comment.id}">\${escapeHtml(comment.relativePath)}:\${comment.line}</a>
+            <button class="icon-btn" data-edit="\${comment.id}" title="Edit comment">✎</button>
           </div>
+          <div class="comment">\${escapeHtml(comment.comment)}</div>
+          <pre class="code">\${renderContext(comment.context)}</pre>
           <div class="\${isEditing ? "editor-row" : "hidden"}">
             <textarea class="editor-input" data-editor="\${comment.id}">\${escapeHtml(comment.comment)}</textarea>
             <div class="actions">
@@ -719,6 +743,16 @@ function getWebviewHtml(webview) {
         count: repoGroup.count,
         worktrees: Array.from(repoGroup.worktreeMap.values()),
       }));
+    }
+
+    function renderContext(lines) {
+      return lines
+        .map((line) => {
+          const escaped = escapeHtml(line);
+          const active = line.trim().startsWith(">");
+          return \`<span class="code-line \${active ? "code-line-active" : ""}">\${escaped}</span>\`;
+        })
+        .join("");
     }
 
     window.addEventListener("message", (event) => {
