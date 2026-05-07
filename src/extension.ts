@@ -416,7 +416,7 @@ function buildReviewCopyText(comments: ReviewComment[]): string {
 
 function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   const nonce = makeId().replace(/[^a-z0-9]/gi, "");
-  const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+  const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; font-src ${webview.cspSource}; script-src 'nonce-${nonce}';`;
   const codiconUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, "node_modules", "@vscode", "codicons", "dist", "codicon.css")
   );
