@@ -25,6 +25,9 @@ function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand("codeReview.sendForReview", async () => {
         await provider.sendForReview();
     }));
+    context.subscriptions.push(vscode.commands.registerCommand("codeReview.sendInCurrentTerminal", async () => {
+        await provider.sendInCurrentTerminal();
+    }));
 }
 class CodeReviewSidebarProvider {
     constructor(context) {
@@ -44,7 +47,8 @@ class CodeReviewSidebarProvider {
         webviewView.webview.options = {
             enableScripts: true,
         };
-        webviewView.webview.html = getWebviewHtml(webviewView.webview, this.context.extensionUri);
+        const claudeIconUri = webviewView.webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "claude-spark.svg"));
+        webviewView.webview.html = getWebviewHtml(webviewView.webview, this.context.extensionUri, claudeIconUri);
         webviewView.webview.onDidReceiveMessage(async (message) => {
             switch (message.type) {
                 case "ready":
@@ -61,6 +65,9 @@ class CodeReviewSidebarProvider {
                     break;
                 case "sendForReviewWorktree":
                     await this.sendForReview(message.workspaceFolderPath);
+                    break;
+                case "sendInCurrentTerminalWorktree":
+                    await this.sendInCurrentTerminal(message.workspaceFolderPath);
                     break;
                 case "clearPendingWorktree":
                     await this.clearPending(message.workspaceFolderPath);
@@ -137,15 +144,70 @@ class CodeReviewSidebarProvider {
         this.postState();
     }
     async sendForReview(workspaceFolderPath) {
-        const targetComments = workspaceFolderPath
-            ? this.state.pending.filter((comment) => comment.workspaceFolderPath === workspaceFolderPath)
-            : this.state.pending;
+        const targetComments = this.getTargetCommentsForSend(workspaceFolderPath);
         if (!targetComments.length) {
             vscode.window.showWarningMessage("No pending review comments to send.");
             return;
         }
+        const cwd = this.resolveSendCwd(workspaceFolderPath, targetComments);
+        if (!cwd) {
+            vscode.window.showWarningMessage("Pending comments span multiple workspace folders. Use the send actions under each worktree in the sidebar.");
+            return;
+        }
         const copiedText = buildReviewCopyText(targetComments);
         await vscode.env.clipboard.writeText(copiedText);
+        this.commitReviewBatch(targetComments, copiedText, workspaceFolderPath);
+        await this.saveState();
+        this.postState();
+        const terminal = vscode.window.createTerminal({
+            name: "Code review · Claude",
+            cwd,
+        });
+        terminal.show();
+        sendReviewTextToTerminal(terminal, copiedText);
+        vscode.window.showInformationMessage("Review saved; new terminal opened with review text for Claude Code (clipboard updated).");
+    }
+    async sendInCurrentTerminal(workspaceFolderPath) {
+        const active = vscode.window.activeTerminal;
+        if (!active) {
+            return;
+        }
+        const targetComments = this.getTargetCommentsForSend(workspaceFolderPath);
+        if (!targetComments.length) {
+            vscode.window.showWarningMessage("No pending review comments to send.");
+            return;
+        }
+        if (this.resolveSendCwd(workspaceFolderPath, targetComments) === undefined) {
+            vscode.window.showWarningMessage("Pending comments span multiple workspace folders. Use the send actions under each worktree in the sidebar.");
+            return;
+        }
+        const copiedText = buildReviewCopyText(targetComments);
+        await vscode.env.clipboard.writeText(copiedText);
+        this.commitReviewBatch(targetComments, copiedText, workspaceFolderPath);
+        await this.saveState();
+        this.postState();
+        sendReviewTextToTerminal(active, copiedText);
+        vscode.window.showInformationMessage("Review saved; pasted into active terminal for Claude Code (clipboard updated).");
+    }
+    getTargetCommentsForSend(workspaceFolderPath) {
+        return workspaceFolderPath
+            ? this.state.pending.filter((comment) => comment.workspaceFolderPath === workspaceFolderPath)
+            : this.state.pending;
+    }
+    /**
+     * When `workspaceFolderPath` is omitted, requires all target comments to share one folder.
+     */
+    resolveSendCwd(workspaceFolderPath, targetComments) {
+        if (workspaceFolderPath) {
+            return workspaceFolderPath;
+        }
+        const folders = [...new Set(targetComments.map((c) => c.workspaceFolderPath))];
+        if (folders.length !== 1) {
+            return undefined;
+        }
+        return folders[0];
+    }
+    commitReviewBatch(targetComments, copiedText, workspaceFolderPath) {
         const batch = {
             id: makeId(),
             createdAt: new Date().toISOString(),
@@ -156,9 +218,6 @@ class CodeReviewSidebarProvider {
         this.state.pending = workspaceFolderPath
             ? this.state.pending.filter((comment) => comment.workspaceFolderPath !== workspaceFolderPath)
             : [];
-        await this.saveState();
-        this.postState();
-        vscode.window.showInformationMessage("Review copied and saved to Reviews.");
     }
     async rollbackBatch(batchId) {
         const index = this.state.reviews.findIndex((batch) => batch.id === batchId);
@@ -364,9 +423,16 @@ function buildReviewCopyText(comments) {
         ...lines,
     ].join("\n");
 }
-function getWebviewHtml(webview, extensionUri) {
+/** Bracketed paste (OSC 200/201) so multiline review text is not executed by the shell line-by-line. */
+const BRACKETED_PASTE_START = "\u001b[200~";
+const BRACKETED_PASTE_END = "\u001b[201~";
+function sendReviewTextToTerminal(terminal, text) {
+    const safe = text.replace(/\u001b/g, "");
+    terminal.sendText(BRACKETED_PASTE_START + safe + BRACKETED_PASTE_END, false);
+}
+function getWebviewHtml(webview, extensionUri, claudeIconUri) {
     const nonce = makeId().replace(/[^a-z0-9]/gi, "");
-    const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; font-src ${webview.cspSource}; script-src 'nonce-${nonce}';`;
+    const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; font-src ${webview.cspSource}; img-src ${webview.cspSource} data:; script-src 'nonce-${nonce}';`;
     const codiconUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "node_modules", "@vscode", "codicons", "dist", "codicon.css"));
     return `<!DOCTYPE html>
 <html lang="en">
@@ -505,12 +571,31 @@ function getWebviewHtml(webview, extensionUri) {
     }
     .worktree-actions {
       display: flex;
+      align-items: center;
+      flex-wrap: wrap;
       gap: 8px;
       margin: 4px 0 8px;
     }
     .worktree-actions > button {
       font-size: 12px;
       padding: 4px 8px;
+    }
+    .claude-send-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .claude-icon-wrap {
+      display: inline-flex;
+      align-items: center;
+      flex-shrink: 0;
+      opacity: 0.92;
+    }
+    .claude-icon-wrap img {
+      width: 18px;
+      height: 18px;
+      display: block;
     }
     .batch-title {
       font-weight: 600;
@@ -732,7 +817,13 @@ function getWebviewHtml(webview, extensionUri) {
                     </button>
                     <div class="\${worktreeOpen ? "tree-comments" : "hidden"}">
                       <div class="worktree-actions">
-                        <button class="primary" data-send-worktree="\${escapeHtml(worktreeGroup.workspaceFolderPath)}">Send for review</button>
+                        <span class="claude-send-group" title="Claude Code (terminal)">
+                          <span class="claude-icon-wrap" title="Sent via terminal for Claude Code" aria-hidden="true">
+                            <img src="${claudeIconUri}" alt="" />
+                          </span>
+                          <button class="primary" data-send-worktree="\${escapeHtml(worktreeGroup.workspaceFolderPath)}" title="New terminal in this folder — paste for Claude Code">Send for review</button>
+                          <button data-send-current-worktree="\${escapeHtml(worktreeGroup.workspaceFolderPath)}" title="Active terminal — paste for Claude Code">Current terminal</button>
+                        </span>
                         <button data-clear-worktree="\${escapeHtml(worktreeGroup.workspaceFolderPath)}">Clear</button>
                       </div>
                       \${worktreeGroup.comments.map((comment) => renderCommentCard(comment)).join("")}
@@ -868,6 +959,14 @@ function getWebviewHtml(webview, extensionUri) {
           vscode.postMessage({
             type: "sendForReviewWorktree",
             workspaceFolderPath: btn.getAttribute("data-send-worktree"),
+          });
+        });
+      });
+      root.querySelectorAll("[data-send-current-worktree]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          vscode.postMessage({
+            type: "sendInCurrentTerminalWorktree",
+            workspaceFolderPath: btn.getAttribute("data-send-current-worktree"),
           });
         });
       });

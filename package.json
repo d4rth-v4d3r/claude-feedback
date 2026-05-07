@@ -1,11 +1,11 @@
 {
   "name": "cursor-code-review-helper",
   "displayName": "Cursor Code Review Helper",
-  "description": "Collect code review comments into pending/review batches and copy them for sharing.",
-  "version": "0.0.17",
+  "description": "Collect code review comments into pending/review batches, then send to Claude Code via the integrated terminal.",
+  "version": "0.0.18",
   "publisher": "local",
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.98.0"
   },
   "categories": [
     "Other"
@@ -15,7 +15,8 @@
     "onCommand:codeReview.addComment",
     "onCommand:codeReview.openSidebar",
     "onCommand:codeReview.clearPending",
-    "onCommand:codeReview.sendForReview"
+    "onCommand:codeReview.sendForReview",
+    "onCommand:codeReview.sendInCurrentTerminal"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -52,7 +53,13 @@
       },
       {
         "command": "codeReview.sendForReview",
-        "title": "Code Review: Send for Review"
+        "title": "Code Review: Send for Review",
+        "icon": "$(add)"
+      },
+      {
+        "command": "codeReview.sendInCurrentTerminal",
+        "title": "Code Review: Send in Current Terminal",
+        "icon": "$(terminal)"
       }
     ],
     "menus": {
@@ -70,6 +77,11 @@
         },
         {
           "command": "codeReview.sendForReview",
+          "when": "view == codeReviewSidebar",
+          "group": "navigation"
+        },
+        {
+          "command": "codeReview.sendInCurrentTerminal",
           "when": "view == codeReviewSidebar",
           "group": "navigation"
         },
@@ -97,7 +109,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.12.12",
-    "@types/vscode": "^1.90.0",
+    "@types/vscode": "^1.98.0",
     "@vscode/vsce": "^3.9.1",
     "typescript": "^5.4.5"
   },
