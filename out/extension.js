@@ -3,6 +3,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = require("vscode");
+const fs = require("node:fs");
+const path = require("node:path");
+const node_child_process_1 = require("node:child_process");
 const STATE_KEY = "codeReviewSidebarState";
 function activate(context) {
     const provider = new CodeReviewSidebarProvider(context);
@@ -25,6 +28,7 @@ function activate(context) {
 class CodeReviewSidebarProvider {
     constructor(context) {
         this.context = context;
+        this.branchCache = new Map();
         this.state =
             this.context.workspaceState.get(STATE_KEY) ?? { pending: [], reviews: [] };
     }
@@ -77,12 +81,19 @@ class CodeReviewSidebarProvider {
         }
         const document = editor.document;
         const contextLines = this.readContext(document, lineNumber - 1);
+        const metadata = this.getLocationMetadata(document.uri);
         const newComment = {
             id: makeId(),
             filePath: document.uri.fsPath,
+            relativePath: metadata.relativePath,
             line: lineNumber,
             comment: input.trim(),
             context: contextLines,
+            repoName: metadata.repoName,
+            repoPath: metadata.repoPath,
+            worktreeName: metadata.worktreeName,
+            workspaceFolderPath: metadata.workspaceFolderPath,
+            branchName: metadata.branchName,
             createdAt: new Date().toISOString(),
         };
         this.state.pending = [newComment, ...this.state.pending];
@@ -129,7 +140,10 @@ class CodeReviewSidebarProvider {
         this.postState();
     }
     async openComment(commentId) {
-        const allComments = [...this.state.pending, ...this.state.reviews.flatMap((batch) => batch.comments)];
+        const allComments = [
+            ...this.state.pending.map((comment) => this.normalizeComment(comment)),
+            ...this.state.reviews.flatMap((batch) => batch.comments.map((comment) => this.normalizeComment(comment))),
+        ];
         const target = allComments.find((comment) => comment.id === commentId);
         if (!target) {
             return;
@@ -179,10 +193,88 @@ class CodeReviewSidebarProvider {
         await this.context.workspaceState.update(STATE_KEY, this.state);
     }
     postState() {
+        const pending = this.state.pending
+            .map((comment) => this.normalizeComment(comment))
+            .filter((comment) => this.isWorkspaceVisible(comment.workspaceFolderPath));
+        const reviews = this.state.reviews
+            .map((batch) => ({
+            ...batch,
+            comments: batch.comments
+                .map((comment) => this.normalizeComment(comment))
+                .filter((comment) => this.isWorkspaceVisible(comment.workspaceFolderPath)),
+        }))
+            .filter((batch) => batch.comments.length > 0);
         this.view?.webview.postMessage({
             type: "state",
-            state: this.state,
+            state: { pending, reviews },
         });
+    }
+    normalizeComment(comment) {
+        if (comment.relativePath &&
+            comment.repoName &&
+            comment.repoPath &&
+            comment.worktreeName &&
+            comment.workspaceFolderPath &&
+            comment.branchName) {
+            return comment;
+        }
+        const metadata = this.getLocationMetadata(vscode.Uri.file(comment.filePath));
+        return {
+            ...comment,
+            relativePath: comment.relativePath ?? metadata.relativePath,
+            repoName: comment.repoName ?? metadata.repoName,
+            repoPath: comment.repoPath ?? metadata.repoPath,
+            worktreeName: comment.worktreeName ?? metadata.worktreeName,
+            workspaceFolderPath: comment.workspaceFolderPath ?? metadata.workspaceFolderPath,
+            branchName: comment.branchName ?? metadata.branchName,
+        };
+    }
+    isWorkspaceVisible(workspaceFolderPath) {
+        const folders = vscode.workspace.workspaceFolders ?? [];
+        return folders.some((folder) => folder.uri.fsPath === workspaceFolderPath);
+    }
+    getLocationMetadata(uri) {
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+        const workspaceFolderPath = workspaceFolder?.uri.fsPath ?? path.dirname(uri.fsPath);
+        const relativePath = workspaceFolder ? path.relative(workspaceFolder.uri.fsPath, uri.fsPath) : path.basename(uri.fsPath);
+        const repoPath = this.findGitRoot(path.dirname(uri.fsPath)) ?? workspaceFolderPath;
+        const repoName = path.basename(repoPath);
+        const worktreeName = path.basename(workspaceFolderPath);
+        const branchName = this.getBranchName(repoPath);
+        return { relativePath, repoName, repoPath, worktreeName, workspaceFolderPath, branchName };
+    }
+    findGitRoot(startDir) {
+        let current = startDir;
+        while (true) {
+            if (fs.existsSync(path.join(current, ".git"))) {
+                return current;
+            }
+            const parent = path.dirname(current);
+            if (parent === current) {
+                return undefined;
+            }
+            current = parent;
+        }
+    }
+    getBranchName(repoPath) {
+        const cached = this.branchCache.get(repoPath);
+        if (cached) {
+            return cached;
+        }
+        try {
+            const branch = (0, node_child_process_1.execSync)("git rev-parse --abbrev-ref HEAD", {
+                cwd: repoPath,
+                stdio: ["ignore", "pipe", "ignore"],
+                encoding: "utf8",
+            }).trim();
+            const resolved = branch || "detached";
+            this.branchCache.set(repoPath, resolved);
+            return resolved;
+        }
+        catch {
+            this.branchCache.set(repoPath, "unknown");
+            return "unknown";
+        }
     }
 }
 function makeId() {
@@ -263,11 +355,22 @@ function getWebviewHtml(webview) {
       font-size: 12px;
       opacity: 0.8;
     }
-    .path {
+    .path-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 8px;
       font-family: var(--vscode-editor-font-family);
       font-size: 12px;
-      margin-bottom: 8px;
-      word-break: break-all;
+      color: var(--vscode-textLink-foreground);
+      text-decoration: none;
+      cursor: pointer;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .path-link:hover {
+      color: var(--vscode-textLink-activeForeground);
+      text-decoration: underline;
     }
     .comment {
       margin-bottom: 8px;
@@ -350,6 +453,42 @@ function getWebviewHtml(webview) {
       font-family: var(--vscode-font-family);
       font-size: 12px;
     }
+    .tree-group {
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--vscode-sideBar-background);
+    }
+    .tree-summary {
+      width: 100%;
+      border: 0;
+      background: transparent;
+      color: var(--vscode-foreground);
+      text-align: left;
+      font-weight: 600;
+      padding: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      cursor: pointer;
+    }
+    .tree-children {
+      border-top: 1px solid var(--vscode-panel-border);
+      padding: 8px;
+      display: grid;
+      gap: 8px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid var(--vscode-panel-border);
+      font-size: 11px;
+      padding: 1px 8px;
+      opacity: 0.9;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
@@ -366,7 +505,15 @@ function getWebviewHtml(webview) {
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    const state = { pending: [], reviews: [], tab: "pending", expandedBatches: {}, editingCommentId: null };
+    const state = {
+      pending: [],
+      reviews: [],
+      tab: "pending",
+      expandedBatches: {},
+      expandedRepos: {},
+      expandedWorktrees: {},
+      editingCommentId: null
+    };
 
     const tabPending = document.getElementById("tab-pending");
     const tabReviews = document.getElementById("tab-reviews");
@@ -396,7 +543,36 @@ function getWebviewHtml(webview) {
         pendingList.innerHTML = '<div class="empty">No pending comments yet. Use right click or Cmd/Ctrl+Alt+R in the editor.</div>';
         return;
       }
-      pendingList.innerHTML = state.pending.map((comment) => renderCommentCard(comment)).join("");
+      const grouped = groupPending(state.pending);
+      pendingList.innerHTML = grouped.map((repoGroup) => {
+        const repoKey = repoGroup.repoName;
+        const repoOpen = state.expandedRepos[repoKey] ?? true;
+        return \`
+          <section class="tree-group">
+            <button class="tree-summary" data-toggle-repo="\${escapeHtml(repoKey)}">
+              <span>\${repoOpen ? "▾" : "▸"} \${escapeHtml(repoGroup.repoName)}</span>
+              <span class="badge">\${repoGroup.count} comment(s)</span>
+            </button>
+            <div class="\${repoOpen ? "tree-children" : "hidden"}">
+              \${repoGroup.worktrees.map((worktreeGroup) => {
+                const worktreeKey = \`\${repoKey}::\${worktreeGroup.worktreeName}\`;
+                const worktreeOpen = state.expandedWorktrees[worktreeKey] ?? true;
+                return \`
+                  <section class="tree-group">
+                    <button class="tree-summary" data-toggle-worktree="\${escapeHtml(worktreeKey)}">
+                      <span>\${worktreeOpen ? "▾" : "▸"} \${escapeHtml(worktreeGroup.worktreeName)}</span>
+                      <span class="badge">\${escapeHtml(worktreeGroup.branchName)}</span>
+                    </button>
+                    <div class="\${worktreeOpen ? "tree-children" : "hidden"}">
+                      \${worktreeGroup.comments.map((comment) => renderCommentCard(comment)).join("")}
+                    </div>
+                  </section>
+                \`;
+              }).join("")}
+            </div>
+          </section>
+        \`;
+      }).join("");
       wireOpenButtons(pendingList);
     }
 
@@ -446,11 +622,13 @@ function getWebviewHtml(webview) {
             <span>L\${comment.line}</span>
             <span>\${new Date(comment.createdAt).toLocaleString()}</span>
           </div>
-          <div class="path">\${escapeHtml(comment.filePath)}</div>
+          <a class="path-link" data-open="\${comment.id}">
+            <span>✎</span>
+            <span>\${escapeHtml(comment.relativePath)}:\${comment.line}</span>
+          </a>
           <div class="comment">\${escapeHtml(comment.comment)}</div>
           <pre class="code">\${escapeHtml(comment.context.join("\\n"))}</pre>
           <div class="actions">
-            <button data-open="\${comment.id}">Go to code</button>
             <button data-edit="\${comment.id}">\${isEditing ? "Close" : "Edit"}</button>
           </div>
           <div class="\${isEditing ? "editor-row" : "hidden"}">
@@ -464,6 +642,20 @@ function getWebviewHtml(webview) {
     }
 
     function wireOpenButtons(root) {
+      root.querySelectorAll("[data-toggle-repo]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const key = btn.getAttribute("data-toggle-repo");
+          state.expandedRepos[key] = !(state.expandedRepos[key] ?? true);
+          renderPending();
+        });
+      });
+      root.querySelectorAll("[data-toggle-worktree]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const key = btn.getAttribute("data-toggle-worktree");
+          state.expandedWorktrees[key] = !(state.expandedWorktrees[key] ?? true);
+          renderPending();
+        });
+      });
       root.querySelectorAll("[data-open]").forEach((btn) => {
         btn.addEventListener("click", () => {
           vscode.postMessage({ type: "openComment", commentId: btn.getAttribute("data-open") });
@@ -498,6 +690,28 @@ function getWebviewHtml(webview) {
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#39;");
+    }
+
+    function groupPending(comments) {
+      const repoMap = new Map();
+      for (const comment of comments) {
+        const repoName = comment.repoName || "Unknown Repo";
+        const worktreeName = comment.worktreeName || "Unknown Worktree";
+        const repoGroup = repoMap.get(repoName) || { repoName, count: 0, worktreeMap: new Map() };
+        repoGroup.count += 1;
+        const worktreeGroup =
+          repoGroup.worktreeMap.get(worktreeName) ||
+          { worktreeName, branchName: comment.branchName || "unknown", comments: [] };
+        worktreeGroup.comments.push(comment);
+        repoGroup.worktreeMap.set(worktreeName, worktreeGroup);
+        repoMap.set(repoName, repoGroup);
+      }
+
+      return Array.from(repoMap.values()).map((repoGroup) => ({
+        repoName: repoGroup.repoName,
+        count: repoGroup.count,
+        worktrees: Array.from(repoGroup.worktreeMap.values()),
+      }));
     }
 
     window.addEventListener("message", (event) => {
