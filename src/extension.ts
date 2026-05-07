@@ -106,6 +106,12 @@ class CodeReviewSidebarProvider implements vscode.WebviewViewProvider {
         case "clearPending":
           await this.clearPending();
           break;
+        case "sendForReviewWorktree":
+          await this.sendForReview(message.workspaceFolderPath);
+          break;
+        case "clearPendingWorktree":
+          await this.clearPending(message.workspaceFolderPath);
+          break;
         case "rollbackBatch":
           await this.rollbackBatch(message.batchId);
           break;
@@ -164,33 +170,52 @@ class CodeReviewSidebarProvider implements vscode.WebviewViewProvider {
     vscode.window.showInformationMessage("Review comment added to Pending.");
   }
 
-  async clearPending(): Promise<void> {
-    if (!this.state.pending.length) {
+  async clearPending(workspaceFolderPath?: string): Promise<void> {
+    if (!this.state.pending.length || !workspaceFolderPath) {
+      if (!this.state.pending.length) {
+        return;
+      }
+      this.state.pending = [];
+      await this.saveState();
+      this.postState();
       return;
     }
-    this.state.pending = [];
+
+    const nextPending = this.state.pending.filter(
+      (comment) => comment.workspaceFolderPath !== workspaceFolderPath
+    );
+    if (nextPending.length === this.state.pending.length) {
+      return;
+    }
+    this.state.pending = nextPending;
     await this.saveState();
     this.postState();
   }
 
-  async sendForReview(): Promise<void> {
-    if (!this.state.pending.length) {
+  async sendForReview(workspaceFolderPath?: string): Promise<void> {
+    const targetComments = workspaceFolderPath
+      ? this.state.pending.filter((comment) => comment.workspaceFolderPath === workspaceFolderPath)
+      : this.state.pending;
+
+    if (!targetComments.length) {
       vscode.window.showWarningMessage("No pending review comments to send.");
       return;
     }
 
-    const copiedText = buildReviewCopyText(this.state.pending);
+    const copiedText = buildReviewCopyText(targetComments);
     await vscode.env.clipboard.writeText(copiedText);
 
     const batch: ReviewBatch = {
       id: makeId(),
       createdAt: new Date().toISOString(),
-      comments: [...this.state.pending],
+      comments: [...targetComments],
       copiedText,
     };
 
     this.state.reviews = [batch, ...this.state.reviews];
-    this.state.pending = [];
+    this.state.pending = workspaceFolderPath
+      ? this.state.pending.filter((comment) => comment.workspaceFolderPath !== workspaceFolderPath)
+      : [];
     await this.saveState();
     this.postState();
     vscode.window.showInformationMessage("Review copied and saved to Reviews.");
@@ -556,19 +581,14 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
       background: var(--vscode-button-background);
       color: var(--vscode-button-foreground);
     }
-    .fixed-bar {
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      right: 0;
+    .worktree-actions {
       display: flex;
       gap: 8px;
-      padding: 10px;
-      background: var(--vscode-editor-background);
-      border-top: 1px solid var(--vscode-panel-border);
+      margin: 4px 0 8px;
     }
-    .fixed-bar > button {
-      flex: 1;
+    .worktree-actions > button {
+      font-size: 12px;
+      padding: 4px 8px;
     }
     .batch-title {
       font-weight: 600;
@@ -708,11 +728,6 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
   </div>
   <section id="pending-list" class="list"></section>
   <section id="reviews-list" class="list hidden"></section>
-  <div id="pending-actions" class="fixed-bar">
-    <button id="clear" title="Clear pending comments">Clear</button>
-    <button class="primary" id="send" title="Copy and archive pending comments">Send for review</button>
-  </div>
-
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const state = {
@@ -729,9 +744,6 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
     const tabReviews = document.getElementById("tab-reviews");
     const pendingList = document.getElementById("pending-list");
     const reviewsList = document.getElementById("reviews-list");
-    const pendingActions = document.getElementById("pending-actions");
-    const clearBtn = document.getElementById("clear");
-    const sendBtn = document.getElementById("send");
 
     function setTab(tab) {
       state.tab = tab;
@@ -740,13 +752,10 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
       tabReviews.classList.toggle("active", !pendingActive);
       pendingList.classList.toggle("hidden", !pendingActive);
       reviewsList.classList.toggle("hidden", pendingActive);
-      pendingActions.classList.toggle("hidden", !pendingActive);
     }
 
     tabPending.addEventListener("click", () => setTab("pending"));
     tabReviews.addEventListener("click", () => setTab("reviews"));
-    clearBtn.addEventListener("click", () => vscode.postMessage({ type: "clearPending" }));
-    sendBtn.addEventListener("click", () => vscode.postMessage({ type: "sendForReview" }));
 
     function renderPending() {
       if (!state.pending.length) {
@@ -786,9 +795,14 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
                       <span class="tree-row-meta">
                         \${worktreeGroup.isRootWorktree ? '<span class="badge">root</span>' : ""}
                         <span class="badge">\${escapeHtml(worktreeGroup.branchName)}</span>
+                        <span class="badge">\${worktreeGroup.comments.length} comment(s)</span>
                       </span>
                     </button>
                     <div class="\${worktreeOpen ? "tree-comments" : "hidden"}">
+                      <div class="worktree-actions">
+                        <button class="primary" data-send-worktree="\${escapeHtml(worktreeGroup.workspaceFolderPath)}">Send for review</button>
+                        <button data-clear-worktree="\${escapeHtml(worktreeGroup.workspaceFolderPath)}">Clear</button>
+                      </div>
                       \${worktreeGroup.comments.map((comment) => renderCommentCard(comment)).join("")}
                     </div>
                   </section>
@@ -903,6 +917,22 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
           state.editingCommentId = null;
         });
       });
+      root.querySelectorAll("[data-send-worktree]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          vscode.postMessage({
+            type: "sendForReviewWorktree",
+            workspaceFolderPath: btn.getAttribute("data-send-worktree"),
+          });
+        });
+      });
+      root.querySelectorAll("[data-clear-worktree]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          vscode.postMessage({
+            type: "clearPendingWorktree",
+            workspaceFolderPath: btn.getAttribute("data-clear-worktree"),
+          });
+        });
+      });
     }
 
     function escapeHtml(text) {
@@ -928,6 +958,7 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
           repoGroup.worktreeMap.get(worktreeName) ||
           {
             worktreeName,
+            workspaceFolderPath: comment.workspaceFolderPath,
             branchName: comment.branchName || "unknown",
             isRootWorktree: worktreeName === repoName,
             comments: [],
