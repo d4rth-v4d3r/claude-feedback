@@ -118,6 +118,9 @@ class CodeReviewSidebarProvider implements vscode.WebviewViewProvider {
         case "updateComment":
           await this.updateComment(message.commentId, message.commentText);
           break;
+        case "deleteComment":
+          await this.deleteComment(message.commentId);
+          break;
       }
     });
 
@@ -277,6 +280,28 @@ class CodeReviewSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async deleteComment(commentId: string): Promise<void> {
+    const pendingBefore = this.state.pending.length;
+    this.state.pending = this.state.pending.filter((item) => item.id !== commentId);
+    if (this.state.pending.length !== pendingBefore) {
+      await this.saveState();
+      this.postState();
+      return;
+    }
+
+    for (const batch of this.state.reviews) {
+      const before = batch.comments.length;
+      batch.comments = batch.comments.filter((item) => item.id !== commentId);
+      if (batch.comments.length !== before) {
+        batch.copiedText = buildReviewCopyText(batch.comments);
+        this.state.reviews = this.state.reviews.filter((candidate) => candidate.comments.length > 0);
+        await this.saveState();
+        this.postState();
+        return;
+      }
+    }
+  }
+
   private readContext(document: vscode.TextDocument, lineIndex: number): string[] {
     const start = Math.max(lineIndex - 2, 0);
     const end = Math.min(lineIndex + 2, document.lineCount - 1);
@@ -348,7 +373,7 @@ class CodeReviewSidebarProvider implements vscode.WebviewViewProvider {
     const repoPath = gitIdentity.repoRootPath;
     const repoName = gitIdentity.repoName;
     const worktreeName = gitIdentity.worktreeName;
-    const branchName = this.getBranchName(repoPath);
+    const branchName = this.getBranchName(gitIdentity.worktreeRootPath);
 
     return { relativePath, repoName, repoPath, worktreeName, workspaceFolderPath, branchName };
   }
@@ -647,6 +672,9 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
       gap: 6px;
       min-width: 0;
     }
+    .tree-row-label.worktree {
+      margin-left: 10px;
+    }
     .tree-row-title {
       overflow: hidden;
       text-overflow: ellipsis;
@@ -794,7 +822,7 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
                 return \`
                   <section class="tree-node">
                     <button class="tree-row worktree" data-toggle-worktree="\${escapeHtml(worktreeKey)}">
-                      <span class="tree-row-label">
+                      <span class="tree-row-label worktree">
                         <span>\${worktreeOpen ? "▾" : "▸"}</span>
                         <span class="codicon codicon-git-branch tree-icon"></span>
                         <span class="tree-row-title">\${escapeHtml(worktreeGroup.worktreeName)}</span>
@@ -865,12 +893,19 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
       return \`
         <article class="card">
           <div class="meta">
-            <span>L\${comment.line}</span>
+            <span></span>
             <span>\${new Date(comment.createdAt).toLocaleString()}</span>
           </div>
           <div class="path-row">
-            <a class="path-link" data-open="\${comment.id}">\${escapeHtml(comment.relativePath)}:\${comment.line}</a>
-            <button class="icon-btn" data-edit="\${comment.id}" title="Edit comment">✎</button>
+            <a class="path-link" data-open="\${comment.id}">\${escapeHtml(formatFileLineLabel(comment.relativePath, comment.line))}</a>
+            <div class="actions">
+              <button class="icon-btn" data-edit="\${comment.id}" title="Edit comment">
+                <span class="codicon codicon-edit"></span>
+              </button>
+              <button class="icon-btn" data-delete="\${comment.id}" title="Delete comment">
+                <span class="codicon codicon-trash"></span>
+              </button>
+            </div>
           </div>
           <div class="comment">\${escapeHtml(comment.comment)}</div>
           <pre class="code">\${renderContext(comment.context)}</pre>
@@ -922,6 +957,13 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
           const next = input.value ?? "";
           vscode.postMessage({ type: "updateComment", commentId, commentText: next });
           state.editingCommentId = null;
+        });
+      });
+      root.querySelectorAll("[data-delete]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const commentId = btn.getAttribute("data-delete");
+          state.editingCommentId = state.editingCommentId === commentId ? null : state.editingCommentId;
+          vscode.postMessage({ type: "deleteComment", commentId });
         });
       });
       root.querySelectorAll("[data-send-worktree]").forEach((btn) => {
@@ -992,6 +1034,14 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
           return \`<span class="code-line \${active ? "code-line-active" : ""}">\${escaped}</span>\`;
         })
         .join("");
+    }
+
+    function formatFileLineLabel(relativePath, line) {
+      const fileName = String(relativePath || "")
+        .split(/[\\\\/]/)
+        .filter(Boolean)
+        .pop() || String(relativePath || "unknown");
+      return \`\${fileName}:L\${line}\`;
     }
 
     function formatCommentCount(count) {
