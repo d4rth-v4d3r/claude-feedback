@@ -2,7 +2,7 @@
   "name": "cursor-code-review-helper",
   "displayName": "Cursor Code Review Helper",
   "description": "Collect code review comments into pending/review batches and copy them for sharing.",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"

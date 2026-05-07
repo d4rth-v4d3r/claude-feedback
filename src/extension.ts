@@ -288,26 +288,17 @@ class CodeReviewSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private normalizeComment(comment: ReviewComment): ReviewComment {
-    if (
-      comment.relativePath &&
-      comment.repoName &&
-      comment.repoPath &&
-      comment.worktreeName &&
-      comment.workspaceFolderPath &&
-      comment.branchName
-    ) {
-      return comment;
-    }
-
+    // Always rehydrate location metadata from file path so older persisted
+    // comments get corrected when grouping logic changes.
     const metadata = this.getLocationMetadata(vscode.Uri.file(comment.filePath));
     return {
       ...comment,
-      relativePath: comment.relativePath ?? metadata.relativePath,
-      repoName: comment.repoName ?? metadata.repoName,
-      repoPath: comment.repoPath ?? metadata.repoPath,
-      worktreeName: comment.worktreeName ?? metadata.worktreeName,
-      workspaceFolderPath: comment.workspaceFolderPath ?? metadata.workspaceFolderPath,
-      branchName: comment.branchName ?? metadata.branchName,
+      relativePath: metadata.relativePath,
+      repoName: metadata.repoName,
+      repoPath: metadata.repoPath,
+      worktreeName: metadata.worktreeName,
+      workspaceFolderPath: metadata.workspaceFolderPath,
+      branchName: metadata.branchName,
     };
   }
 
