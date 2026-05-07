@@ -711,6 +711,14 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
       opacity: 0.9;
       white-space: nowrap;
     }
+    .count-badge {
+      color: var(--vscode-badge-foreground);
+      background: var(--vscode-badge-background);
+      border-color: color-mix(in srgb, var(--vscode-badge-background) 70%, var(--vscode-panel-border));
+      font-weight: 700;
+      min-width: 36px;
+      justify-content: center;
+    }
     .code-line {
       display: block;
       white-space: pre;
@@ -776,7 +784,7 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
                 <span class="tree-row-title">\${escapeHtml(repoGroup.repoName)}</span>
               </span>
               <span class="tree-row-meta">
-                <span class="badge">\${repoGroup.count} comment(s)</span>
+                <span class="badge count-badge">\${formatCommentCount(repoGroup.count)}</span>
               </span>
             </button>
             <div class="\${repoOpen ? "tree-children" : "hidden"}">
@@ -789,13 +797,12 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
                       <span class="tree-row-label">
                         <span>\${worktreeOpen ? "▾" : "▸"}</span>
                         <span class="codicon codicon-git-branch tree-icon"></span>
-                        <span class="type-badge worktree">Worktree</span>
                         <span class="tree-row-title">\${escapeHtml(worktreeGroup.worktreeName)}</span>
                       </span>
                       <span class="tree-row-meta">
                         \${worktreeGroup.isRootWorktree ? '<span class="badge">root</span>' : ""}
                         <span class="badge">\${escapeHtml(worktreeGroup.branchName)}</span>
-                        <span class="badge">\${worktreeGroup.comments.length} comment(s)</span>
+                        <span class="badge count-badge">\${formatCommentCount(worktreeGroup.comments.length)}</span>
                       </span>
                     </button>
                     <div class="\${worktreeOpen ? "tree-comments" : "hidden"}">
@@ -985,6 +992,11 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
           return \`<span class="code-line \${active ? "code-line-active" : ""}">\${escaped}</span>\`;
         })
         .join("");
+    }
+
+    function formatCommentCount(count) {
+      const safeCount = Number(count) || 0;
+      return safeCount > 99 ? "99+" : String(safeCount);
     }
 
     window.addEventListener("message", (event) => {
