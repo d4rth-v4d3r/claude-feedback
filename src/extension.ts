@@ -32,6 +32,14 @@ type AppState = {
 
 const WORKSPACE_STATE_KEY = "codeReviewSidebarState";
 const GLOBAL_STATE_KEY = "codeReviewSidebarState.global";
+/** Claude Code extension — same command as palette "Claude Code: Open in Terminal" */
+const CLAUDE_TERMINAL_OPEN_COMMAND = "claude-vscode.terminal.open";
+/** After we observe `claude` start in the shell, wait for the TUI to accept input */
+const CLAUDE_TUI_SETTLE_MS = 2800;
+/** How long to wait for shell integration to report the Claude launch */
+const CLAUDE_LAUNCH_DETECT_MS = 14_000;
+/** If we never see the launch event, wait this long before pasting (best-effort) */
+const CLAUDE_FALLBACK_PASTE_DELAY_MS = 3800;
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new CodeReviewSidebarProvider(context);
@@ -97,10 +105,7 @@ class CodeReviewSidebarProvider implements vscode.WebviewViewProvider {
       enableScripts: true,
     };
 
-    const claudeIconUri = webviewView.webview.asWebviewUri(
-      vscode.Uri.joinPath(this.context.extensionUri, "media", "claude-spark.svg")
-    );
-    webviewView.webview.html = getWebviewHtml(webviewView.webview, this.context.extensionUri, claudeIconUri);
+    webviewView.webview.html = getWebviewHtml(webviewView.webview, this.context.extensionUri);
     webviewView.webview.onDidReceiveMessage(async (message) => {
       switch (message.type) {
         case "ready":
@@ -228,15 +233,37 @@ class CodeReviewSidebarProvider implements vscode.WebviewViewProvider {
     await this.saveState();
     this.postState();
 
-    const terminal = vscode.window.createTerminal({
-      name: "Code review · Claude",
-      cwd,
-    });
+    const { terminal: opened, sawClaudeLaunchOnResolvedTerminal } = await openClaudeTerminalViaExtension();
+    let terminal = opened;
+    let usedClaudeCommand = Boolean(terminal);
+    if (!terminal) {
+      terminal = vscode.window.createTerminal({
+        name: "Code review · Claude",
+        cwd,
+      });
+      usedClaudeCommand = false;
+    }
     terminal.show();
+
+    if (usedClaudeCommand) {
+      let sawLaunch = sawClaudeLaunchOnResolvedTerminal;
+      if (!sawLaunch) {
+        sawLaunch = await waitForClaudeShellLaunch(terminal, CLAUDE_LAUNCH_DETECT_MS);
+      }
+      await sleep(sawLaunch ? CLAUDE_TUI_SETTLE_MS : CLAUDE_FALLBACK_PASTE_DELAY_MS);
+      if (!sawLaunch) {
+        vscode.window.showWarningMessage(
+          "Claude did not report as started in time; pasted anyway. If zsh ran part of the review text, paste from the clipboard after Claude is ready (text no longer uses shell backticks)."
+        );
+      }
+    }
+
     sendReviewTextToTerminal(terminal, copiedText);
 
     vscode.window.showInformationMessage(
-      "Review saved; new terminal opened with review text for Claude Code (clipboard updated)."
+      usedClaudeCommand
+        ? "Review saved; Claude Code terminal opened and review text pasted (clipboard updated)."
+        : "Review saved; plain terminal opened — install or enable Claude Code, then use “Open in Terminal” if needed. Clipboard updated."
     );
   }
 
@@ -536,6 +563,132 @@ class CodeReviewSidebarProvider implements vscode.WebviewViewProvider {
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** True when shell integration reports a line that looks like launching the Claude CLI. */
+function commandLineLooksLikeClaudeLaunch(commandLine: string): boolean {
+  const t = commandLine.trim().toLowerCase();
+  if (!t.length) {
+    return false;
+  }
+  if (/\bclaude\b/.test(t)) {
+    return true;
+  }
+  return t.includes("claude-code") || t.includes("@anthropic/claude") || t.includes("anthropic.claude");
+}
+
+/**
+ * Waits until this terminal's shell reports a `claude …` execution starting (VS Code shell integration).
+ * If integration is missing or the event was missed, returns false after `timeoutMs`.
+ */
+function waitForClaudeShellLaunch(terminal: vscode.Terminal, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) {
+        return;
+      }
+      done = true;
+      disposable.dispose();
+      clearTimeout(timer);
+      resolve(ok);
+    };
+
+    const disposable = vscode.window.onDidStartTerminalShellExecution((event) => {
+      if (event.terminal !== terminal) {
+        return;
+      }
+      try {
+        const value = event.execution.commandLine.value;
+        if (commandLineLooksLikeClaudeLaunch(value)) {
+          finish(true);
+        }
+      } catch {
+        // commandLine may be incomplete in rare cases
+      }
+    });
+
+    const timer = setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+/**
+ * Runs “Claude Code: Open in Terminal” (`claude-vscode.terminal.open`) and returns the terminal
+ * that was opened or focused, when the Claude Code extension is installed.
+ * Shell-integration events are recorded from *before* the command runs so the `claude` launch is not missed.
+ */
+async function openClaudeTerminalViaExtension(): Promise<{
+  terminal?: vscode.Terminal;
+  sawClaudeLaunchOnResolvedTerminal: boolean;
+}> {
+  const cmds = await vscode.commands.getCommands(true);
+  if (!cmds.includes(CLAUDE_TERMINAL_OPEN_COMMAND)) {
+    return { terminal: undefined, sawClaudeLaunchOnResolvedTerminal: false };
+  }
+
+  const claudeLaunchTerminals: vscode.Terminal[] = [];
+  const launchSub = vscode.window.onDidStartTerminalShellExecution((e) => {
+    try {
+      if (commandLineLooksLikeClaudeLaunch(e.execution.commandLine.value)) {
+        claudeLaunchTerminals.push(e.terminal);
+      }
+    } catch {
+      /* ignore */
+    }
+  });
+
+  const countBefore = vscode.window.terminals.length;
+  let sub: vscode.Disposable | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
+
+  let settle!: (value: vscode.Terminal | undefined) => void;
+  const waitNew = new Promise<vscode.Terminal | undefined>((resolve) => {
+    settle = (value: vscode.Terminal | undefined) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      sub?.dispose();
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      resolve(value);
+    };
+    sub = vscode.window.onDidOpenTerminal((t) => settle(t));
+    timer = setTimeout(() => settle(undefined), 2500);
+  });
+
+  try {
+    await vscode.commands.executeCommand(CLAUDE_TERMINAL_OPEN_COMMAND);
+  } catch {
+    settle(undefined);
+    launchSub.dispose();
+    return { terminal: undefined, sawClaudeLaunchOnResolvedTerminal: false };
+  }
+
+  let terminal = await waitNew;
+  if (!terminal && vscode.window.terminals.length > countBefore) {
+    terminal = vscode.window.terminals[vscode.window.terminals.length - 1];
+  }
+  if (!terminal) {
+    terminal = vscode.window.activeTerminal ?? undefined;
+  }
+
+  launchSub.dispose();
+
+  const sawClaudeLaunchOnResolvedTerminal = Boolean(
+    terminal && claudeLaunchTerminals.includes(terminal)
+  );
+
+  if (terminal) {
+    await sleep(250);
+  }
+  return { terminal, sawClaudeLaunchOnResolvedTerminal };
+}
+
 function makeId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -546,7 +699,7 @@ function buildReviewCopyText(comments: ReviewComment[]): string {
   );
 
   return [
-    "Please address the following code review comments. Run `git diff` (or `git diff HEAD`) to see the full context of any changes, especially for deleted lines.",
+    "Please address the following code review comments. Run git diff (or git diff HEAD) to see the full context of any changes, especially for deleted lines.",
     "",
     ...lines,
   ].join("\n");
@@ -561,9 +714,9 @@ function sendReviewTextToTerminal(terminal: vscode.Terminal, text: string): void
   terminal.sendText(BRACKETED_PASTE_START + safe + BRACKETED_PASTE_END, false);
 }
 
-function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri, claudeIconUri: vscode.Uri): string {
+function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   const nonce = makeId().replace(/[^a-z0-9]/gi, "");
-  const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; font-src ${webview.cspSource}; img-src ${webview.cspSource} data:; script-src 'nonce-${nonce}';`;
+  const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; font-src ${webview.cspSource}; script-src 'nonce-${nonce}';`;
   const codiconUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, "node_modules", "@vscode", "codicons", "dist", "codicon.css")
   );
@@ -720,16 +873,20 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri, claud
       gap: 6px;
       flex-wrap: wrap;
     }
-    .claude-icon-wrap {
+    .claude-terminal-mark {
       display: inline-flex;
       align-items: center;
+      gap: 5px;
       flex-shrink: 0;
-      opacity: 0.92;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: var(--vscode-descriptionForeground);
+      opacity: 0.95;
     }
-    .claude-icon-wrap img {
-      width: 18px;
-      height: 18px;
-      display: block;
+    .claude-terminal-mark .codicon-terminal {
+      font-size: 15px;
+      opacity: 0.9;
     }
     .batch-title {
       font-weight: 600;
@@ -951,12 +1108,13 @@ function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri, claud
                     </button>
                     <div class="\${worktreeOpen ? "tree-comments" : "hidden"}">
                       <div class="worktree-actions">
-                        <span class="claude-send-group" title="Claude Code (terminal)">
-                          <span class="claude-icon-wrap" title="Sent via terminal for Claude Code" aria-hidden="true">
-                            <img src="${claudeIconUri}" alt="" />
+                        <span class="claude-send-group" title="Claude Code (integrated terminal)">
+                          <span class="claude-terminal-mark" title="Uses Claude Code “Open in Terminal”, then pastes this review">
+                            <span class="codicon codicon-terminal" aria-hidden="true"></span>
+                            <span>Claude</span>
                           </span>
-                          <button class="primary" data-send-worktree="\${escapeHtml(worktreeGroup.workspaceFolderPath)}" title="New terminal in this folder — paste for Claude Code">Send for review</button>
-                          <button data-send-current-worktree="\${escapeHtml(worktreeGroup.workspaceFolderPath)}" title="Active terminal — paste for Claude Code">Current terminal</button>
+                          <button class="primary" data-send-worktree="\${escapeHtml(worktreeGroup.workspaceFolderPath)}" title="Runs Claude Code: Open in Terminal, then pastes the review">Open Claude &amp; paste</button>
+                          <button data-send-current-worktree="\${escapeHtml(worktreeGroup.workspaceFolderPath)}" title="Paste into the active terminal (any shell)">Current terminal</button>
                         </span>
                         <button data-clear-worktree="\${escapeHtml(worktreeGroup.workspaceFolderPath)}">Clear</button>
                       </div>

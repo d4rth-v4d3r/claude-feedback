@@ -2,7 +2,7 @@
   "name": "cursor-code-review-helper",
   "displayName": "Cursor Code Review Helper",
   "description": "Collect code review comments into pending/review batches, then send to Claude Code via the integrated terminal.",
-  "version": "0.0.18",
+  "version": "0.0.20",
   "publisher": "local",
   "engines": {
     "vscode": "^1.98.0"
@@ -53,8 +53,8 @@
       },
       {
         "command": "codeReview.sendForReview",
-        "title": "Code Review: Send for Review",
-        "icon": "$(add)"
+        "title": "Code Review: Open Claude Terminal & Send",
+        "icon": "$(terminal)"
       },
       {
         "command": "codeReview.sendInCurrentTerminal",
