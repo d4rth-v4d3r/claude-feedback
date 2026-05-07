@@ -326,13 +326,50 @@ class CodeReviewSidebarProvider implements vscode.WebviewViewProvider {
   } {
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
     const workspaceFolderPath = workspaceFolder?.uri.fsPath ?? path.dirname(uri.fsPath);
-    const relativePath = workspaceFolder ? path.relative(workspaceFolder.uri.fsPath, uri.fsPath) : path.basename(uri.fsPath);
-    const repoPath = this.findGitRoot(path.dirname(uri.fsPath)) ?? workspaceFolderPath;
-    const repoName = path.basename(repoPath);
-    const worktreeName = path.basename(workspaceFolderPath);
+    const discoveredRepoPath = this.findGitRoot(path.dirname(uri.fsPath)) ?? workspaceFolderPath;
+    const gitIdentity = this.getGitIdentity(discoveredRepoPath);
+    const relativePath = path.relative(gitIdentity.worktreeRootPath, uri.fsPath) || path.basename(uri.fsPath);
+    const repoPath = gitIdentity.repoRootPath;
+    const repoName = gitIdentity.repoName;
+    const worktreeName = gitIdentity.worktreeName;
     const branchName = this.getBranchName(repoPath);
 
     return { relativePath, repoName, repoPath, worktreeName, workspaceFolderPath, branchName };
+  }
+
+  private getGitIdentity(candidateRepoPath: string): {
+    repoRootPath: string;
+    worktreeRootPath: string;
+    repoName: string;
+    worktreeName: string;
+  } {
+    try {
+      const worktreeRootPath = execSync("git rev-parse --show-toplevel", {
+        cwd: candidateRepoPath,
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8",
+      }).trim();
+      const commonGitDir = execSync("git rev-parse --path-format=absolute --git-common-dir", {
+        cwd: candidateRepoPath,
+        stdio: ["ignore", "pipe", "ignore"],
+        encoding: "utf8",
+      }).trim();
+
+      const repoRootPath = path.dirname(commonGitDir);
+      return {
+        repoRootPath,
+        worktreeRootPath,
+        repoName: path.basename(repoRootPath),
+        worktreeName: path.basename(worktreeRootPath),
+      };
+    } catch {
+      return {
+        repoRootPath: candidateRepoPath,
+        worktreeRootPath: candidateRepoPath,
+        repoName: path.basename(candidateRepoPath),
+        worktreeName: path.basename(candidateRepoPath),
+      };
+    }
   }
 
   private findGitRoot(startDir: string): string | undefined {
