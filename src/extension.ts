@@ -30,7 +30,8 @@ type AppState = {
   reviews: ReviewBatch[];
 };
 
-const STATE_KEY = "codeReviewSidebarState";
+const WORKSPACE_STATE_KEY = "codeReviewSidebarState";
+const GLOBAL_STATE_KEY = "codeReviewSidebarState.global";
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new CodeReviewSidebarProvider(context);
@@ -72,8 +73,16 @@ class CodeReviewSidebarProvider implements vscode.WebviewViewProvider {
   private branchCache = new Map<string, string>();
 
   constructor(private readonly context: vscode.ExtensionContext) {
-    this.state =
-      this.context.workspaceState.get<AppState>(STATE_KEY) ?? { pending: [], reviews: [] };
+    const globalState = this.context.globalState.get<AppState>(GLOBAL_STATE_KEY);
+    if (globalState) {
+      this.state = globalState;
+      return;
+    }
+
+    const workspaceState =
+      this.context.workspaceState.get<AppState>(WORKSPACE_STATE_KEY) ?? { pending: [], reviews: [] };
+    this.state = workspaceState;
+    void this.context.globalState.update(GLOBAL_STATE_KEY, workspaceState);
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView): void | Thenable<void> {
@@ -256,7 +265,7 @@ class CodeReviewSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private async saveState(): Promise<void> {
-    await this.context.workspaceState.update(STATE_KEY, this.state);
+    await this.context.globalState.update(GLOBAL_STATE_KEY, this.state);
   }
 
   private postState(): void {

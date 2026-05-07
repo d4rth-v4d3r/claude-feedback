@@ -6,7 +6,8 @@ const vscode = require("vscode");
 const fs = require("node:fs");
 const path = require("node:path");
 const node_child_process_1 = require("node:child_process");
-const STATE_KEY = "codeReviewSidebarState";
+const WORKSPACE_STATE_KEY = "codeReviewSidebarState";
+const GLOBAL_STATE_KEY = "codeReviewSidebarState.global";
 function activate(context) {
     const provider = new CodeReviewSidebarProvider(context);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider("codeReviewSidebar", provider, {
@@ -29,8 +30,14 @@ class CodeReviewSidebarProvider {
     constructor(context) {
         this.context = context;
         this.branchCache = new Map();
-        this.state =
-            this.context.workspaceState.get(STATE_KEY) ?? { pending: [], reviews: [] };
+        const globalState = this.context.globalState.get(GLOBAL_STATE_KEY);
+        if (globalState) {
+            this.state = globalState;
+            return;
+        }
+        const workspaceState = this.context.workspaceState.get(WORKSPACE_STATE_KEY) ?? { pending: [], reviews: [] };
+        this.state = workspaceState;
+        void this.context.globalState.update(GLOBAL_STATE_KEY, workspaceState);
     }
     resolveWebviewView(webviewView) {
         this.view = webviewView;
@@ -190,7 +197,7 @@ class CodeReviewSidebarProvider {
         return lines;
     }
     async saveState() {
-        await this.context.workspaceState.update(STATE_KEY, this.state);
+        await this.context.globalState.update(GLOBAL_STATE_KEY, this.state);
     }
     postState() {
         const pending = this.state.pending
