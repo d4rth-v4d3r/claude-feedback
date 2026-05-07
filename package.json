@@ -2,7 +2,7 @@
   "name": "cursor-code-review-helper",
   "displayName": "Cursor Code Review Helper",
   "description": "Native PR-style review threads in the editor and a tree view of pending comments per repo/worktree, sent to Claude Code with one click.",
-  "version": "0.0.25",
+  "version": "0.0.29",
   "publisher": "local",
   "engines": {
     "vscode": "^1.98.0"
@@ -46,10 +46,10 @@
           "scope": "resource",
           "description": "Fallback parent branch for the diff view (e.g. main, origin/main). Per-branch overrides via `git config branch.<name>.codeReviewParent` always win, and Graphite's `gtParentBranchName` is auto-detected. Leave empty to use origin/HEAD."
         },
-        "codeReview.showInlinePending": {
+        "codeReview.compactFolders": {
           "type": "boolean",
           "default": true,
-          "description": "Show pending comments in the editor: gutter marker, line highlight, and end-of-line preview (in addition to the native comment thread)."
+          "description": "Compact directory chains in the Pending tree (e.g. `packages/restaurant-ui` shown as one node when it contains a single child chain), matching VS Code's Explorer behavior."
         }
       }
     },
@@ -107,7 +107,10 @@
       {
         "command": "codeReview.sendForReview",
         "title": "Code Review: Send for review",
-        "icon": "$(claude)"
+        "icon": {
+          "light": "media/claude-spark.svg",
+          "dark": "media/claude-spark.svg"
+        }
       },
       {
         "command": "codeReview.sendInCurrentTerminal",
@@ -117,6 +120,11 @@
       {
         "command": "codeReview.replyComment",
         "title": "Reply",
+        "icon": "$(send)"
+      },
+      {
+        "command": "codeReview.startThread",
+        "title": "Comment",
         "icon": "$(send)"
       },
       {
@@ -227,9 +235,14 @@
       ],
       "comments/commentThread/context": [
         {
+          "command": "codeReview.startThread",
+          "group": "inline@1",
+          "when": "commentController == codeReview.comments && commentThreadIsEmpty"
+        },
+        {
           "command": "codeReview.replyComment",
           "group": "inline@1",
-          "when": "commentController == codeReview.comments"
+          "when": "commentController == codeReview.comments && !commentThreadIsEmpty"
         }
       ],
       "comments/commentThread/title": [

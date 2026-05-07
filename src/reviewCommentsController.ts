@@ -95,8 +95,16 @@ export class ReviewCommentsController implements vscode.Disposable {
       await this.appendMessage(commentId, text);
       return;
     }
+
+    // Empty placeholder thread created by VS Code when the user clicked the
+    // gutter `+`. We don't own it (it's not in `this.threads`), so capture its
+    // anchor, dispose it, and create our own ReviewComment — `refresh()` will
+    // mount a managed thread on the same line. Without the dispose, the
+    // placeholder lingers as a "Start discussion" ghost row.
+    const uri = reply.thread.uri;
     const line = (reply.thread.range?.start.line ?? 0) + 1;
-    await this.addCommentForUri(reply.thread.uri, line, text);
+    reply.thread.dispose();
+    await this.addCommentForUri(uri, line, text);
   }
 
   async appendMessage(commentId: string, body: string): Promise<void> {

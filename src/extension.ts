@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
 import type { ReviewBatch, ReviewComment, ReviewMessage } from "./types";
-import { ReviewEditorHints } from "./reviewEditorHints";
 import { ReviewStore, commentBodyForSend } from "./store";
 import {
   ReviewCommentsController,
@@ -31,17 +30,13 @@ export function activate(context: vscode.ExtensionContext): void {
   const store = new ReviewStore(context);
   const locator = new LocationMetadataResolver();
   const parentResolver = new ParentBranchResolver();
-  const editorHints = new ReviewEditorHints(context, () =>
-    store.getActivePending().filter((c) => isWorkspaceVisible(c.workspaceFolderPath))
-  );
   const commentsController = new ReviewCommentsController(store, async (uri, line, body) => {
     await addCommentForUriAndLine(store, locator, uri, line, body);
   });
   const pendingTree = new PendingTreeProvider(store);
   const resolvedTree = new ResolvedTreeProvider(store);
 
-  context.subscriptions.push(store.onDidChange(() => editorHints.refresh()));
-  context.subscriptions.push(editorHints, commentsController, pendingTree, resolvedTree);
+  context.subscriptions.push(commentsController, pendingTree, resolvedTree);
 
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider("codeReviewPending", pendingTree),
@@ -75,6 +70,17 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand(
       "codeReview.replyComment",
+      async (reply: vscode.CommentReply) => {
+        await commentsController.handleReply(reply);
+      }
+    )
+  );
+
+  // Same handler — separate command id so the empty-thread submit button
+  // can read "Comment" instead of "Reply" via `commentThreadIsEmpty`.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "codeReview.startThread",
       async (reply: vscode.CommentReply) => {
         await commentsController.handleReply(reply);
       }
@@ -635,11 +641,6 @@ const BRACKETED_PASTE_END = "\u001b[201~";
 function sendReviewTextToTerminal(terminal: vscode.Terminal, text: string): void {
   const safe = text.replace(/\u001b/g, "");
   terminal.sendText(BRACKETED_PASTE_START + safe + BRACKETED_PASTE_END, false);
-}
-
-function isWorkspaceVisible(workspaceFolderPath: string): boolean {
-  const folders = vscode.workspace.workspaceFolders ?? [];
-  return folders.some((folder) => folder.uri.fsPath === workspaceFolderPath);
 }
 
 // ---------- Repo / worktree / branch metadata (extracted from previous CodeReviewSidebarProvider) ----------

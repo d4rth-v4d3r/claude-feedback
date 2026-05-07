@@ -7,7 +7,6 @@ const vscode = require("vscode");
 const fs = require("node:fs");
 const path = require("node:path");
 const node_child_process_1 = require("node:child_process");
-const reviewEditorHints_1 = require("./reviewEditorHints");
 const store_1 = require("./store");
 const reviewCommentsController_1 = require("./reviewCommentsController");
 const parentBranchResolver_1 = require("./parentBranchResolver");
@@ -26,14 +25,12 @@ function activate(context) {
     const store = new store_1.ReviewStore(context);
     const locator = new LocationMetadataResolver();
     const parentResolver = new parentBranchResolver_1.ParentBranchResolver();
-    const editorHints = new reviewEditorHints_1.ReviewEditorHints(context, () => store.getActivePending().filter((c) => isWorkspaceVisible(c.workspaceFolderPath)));
     const commentsController = new reviewCommentsController_1.ReviewCommentsController(store, async (uri, line, body) => {
         await addCommentForUriAndLine(store, locator, uri, line, body);
     });
     const pendingTree = new pendingTreeProvider_1.PendingTreeProvider(store);
     const resolvedTree = new resolvedTreeProvider_1.ResolvedTreeProvider(store);
-    context.subscriptions.push(store.onDidChange(() => editorHints.refresh()));
-    context.subscriptions.push(editorHints, commentsController, pendingTree, resolvedTree);
+    context.subscriptions.push(commentsController, pendingTree, resolvedTree);
     context.subscriptions.push(vscode.window.registerTreeDataProvider("codeReviewPending", pendingTree), vscode.window.registerTreeDataProvider("codeReviewResolved", resolvedTree));
     // --- Commands ---
     context.subscriptions.push(vscode.commands.registerCommand("codeReview.openSidebar", async () => {
@@ -50,6 +47,11 @@ function activate(context) {
         await (0, diffOpener_1.openFileDiffVsParent)(target, parentResolver);
     }));
     context.subscriptions.push(vscode.commands.registerCommand("codeReview.replyComment", async (reply) => {
+        await commentsController.handleReply(reply);
+    }));
+    // Same handler — separate command id so the empty-thread submit button
+    // can read "Comment" instead of "Reply" via `commentThreadIsEmpty`.
+    context.subscriptions.push(vscode.commands.registerCommand("codeReview.startThread", async (reply) => {
         await commentsController.handleReply(reply);
     }));
     context.subscriptions.push(vscode.commands.registerCommand("codeReview.editComment", async (comment) => {
@@ -448,10 +450,6 @@ const BRACKETED_PASTE_END = "\u001b[201~";
 function sendReviewTextToTerminal(terminal, text) {
     const safe = text.replace(/\u001b/g, "");
     terminal.sendText(BRACKETED_PASTE_START + safe + BRACKETED_PASTE_END, false);
-}
-function isWorkspaceVisible(workspaceFolderPath) {
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    return folders.some((folder) => folder.uri.fsPath === workspaceFolderPath);
 }
 class LocationMetadataResolver {
     constructor() {
