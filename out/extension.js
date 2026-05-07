@@ -44,7 +44,7 @@ class CodeReviewSidebarProvider {
         webviewView.webview.options = {
             enableScripts: true,
         };
-        webviewView.webview.html = getWebviewHtml(webviewView.webview);
+        webviewView.webview.html = getWebviewHtml(webviewView.webview, this.context.extensionUri);
         webviewView.webview.onDidReceiveMessage(async (message) => {
             switch (message.type) {
                 case "ready":
@@ -320,15 +320,17 @@ function buildReviewCopyText(comments) {
         ...lines,
     ].join("\n");
 }
-function getWebviewHtml(webview) {
+function getWebviewHtml(webview, extensionUri) {
     const nonce = makeId().replace(/[^a-z0-9]/gi, "");
     const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
+    const codiconUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "node_modules", "@vscode", "codicons", "dist", "codicon.css"));
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link href="${codiconUri}" rel="stylesheet" />
   <style>
     :root {
       color-scheme: light dark;
@@ -522,6 +524,58 @@ function getWebviewHtml(webview) {
       gap: 8px;
       cursor: pointer;
     }
+    .tree-row-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .tree-row-title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tree-icon {
+      font-size: 14px;
+    }
+    .tree-row.repo {
+      color: var(--vscode-symbolIcon-moduleForeground, var(--vscode-foreground));
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--vscode-symbolIcon-moduleForeground, var(--vscode-focusBorder)) 10%, transparent);
+    }
+    .tree-row.worktree {
+      color: var(--vscode-symbolIcon-folderForeground, var(--vscode-foreground));
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--vscode-symbolIcon-folderForeground, var(--vscode-focusBorder)) 8%, transparent);
+    }
+    .type-badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid var(--vscode-panel-border);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      padding: 1px 6px;
+      white-space: nowrap;
+      text-transform: uppercase;
+    }
+    .type-badge.repo {
+      color: var(--vscode-symbolIcon-moduleForeground, var(--vscode-foreground));
+      background: color-mix(in srgb, var(--vscode-symbolIcon-moduleForeground, var(--vscode-focusBorder)) 14%, transparent);
+    }
+    .type-badge.worktree {
+      color: var(--vscode-symbolIcon-folderForeground, var(--vscode-foreground));
+      background: color-mix(in srgb, var(--vscode-symbolIcon-folderForeground, var(--vscode-focusBorder)) 12%, transparent);
+    }
+    .tree-row-meta {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
     .tree-children {
       display: grid;
       gap: 8px;
@@ -604,13 +658,20 @@ function getWebviewHtml(webview) {
       }
       const grouped = groupPending(state.pending);
       pendingList.innerHTML = grouped.map((repoGroup) => {
-        const repoKey = repoGroup.repoName;
+        const repoKey = repoGroup.repoKey;
         const repoOpen = state.expandedRepos[repoKey] ?? true;
         return \`
           <section class="tree-node">
-            <button class="tree-row" data-toggle-repo="\${escapeHtml(repoKey)}">
-              <span>\${repoOpen ? "▾" : "▸"} \${escapeHtml(repoGroup.repoName)}</span>
-              <span class="badge">\${repoGroup.count} comment(s)</span>
+            <button class="tree-row repo" data-toggle-repo="\${escapeHtml(repoKey)}" title="\${escapeHtml(repoGroup.repoPath || repoGroup.repoName)}">
+              <span class="tree-row-label">
+                <span>\${repoOpen ? "▾" : "▸"}</span>
+                <span class="codicon codicon-repo tree-icon"></span>
+                <span class="type-badge repo">Repo</span>
+                <span class="tree-row-title">\${escapeHtml(repoGroup.repoName)}</span>
+              </span>
+              <span class="tree-row-meta">
+                <span class="badge">\${repoGroup.count} comment(s)</span>
+              </span>
             </button>
             <div class="\${repoOpen ? "tree-children" : "hidden"}">
               \${repoGroup.worktrees.map((worktreeGroup) => {
@@ -618,9 +679,17 @@ function getWebviewHtml(webview) {
                 const worktreeOpen = state.expandedWorktrees[worktreeKey] ?? true;
                 return \`
                   <section class="tree-node">
-                    <button class="tree-row" data-toggle-worktree="\${escapeHtml(worktreeKey)}">
-                      <span>\${worktreeOpen ? "▾" : "▸"} \${escapeHtml(worktreeGroup.worktreeName)}</span>
-                      <span class="badge">\${escapeHtml(worktreeGroup.branchName)}</span>
+                    <button class="tree-row worktree" data-toggle-worktree="\${escapeHtml(worktreeKey)}">
+                      <span class="tree-row-label">
+                        <span>\${worktreeOpen ? "▾" : "▸"}</span>
+                        <span class="codicon codicon-git-branch tree-icon"></span>
+                        <span class="type-badge worktree">Worktree</span>
+                        <span class="tree-row-title">\${escapeHtml(worktreeGroup.worktreeName)}</span>
+                      </span>
+                      <span class="tree-row-meta">
+                        \${worktreeGroup.isRootWorktree ? '<span class="badge">root</span>' : ""}
+                        <span class="badge">\${escapeHtml(worktreeGroup.branchName)}</span>
+                      </span>
                     </button>
                     <div class="\${worktreeOpen ? "tree-comments" : "hidden"}">
                       \${worktreeGroup.comments.map((comment) => renderCommentCard(comment)).join("")}
@@ -751,20 +820,30 @@ function getWebviewHtml(webview) {
     function groupPending(comments) {
       const repoMap = new Map();
       for (const comment of comments) {
+        const repoPath = comment.repoPath || "";
+        const repoKey = repoPath || comment.repoName || "Unknown Repo";
         const repoName = comment.repoName || "Unknown Repo";
         const worktreeName = comment.worktreeName || "Unknown Worktree";
-        const repoGroup = repoMap.get(repoName) || { repoName, count: 0, worktreeMap: new Map() };
+        const repoGroup =
+          repoMap.get(repoKey) || { repoKey, repoName, repoPath, count: 0, worktreeMap: new Map() };
         repoGroup.count += 1;
         const worktreeGroup =
           repoGroup.worktreeMap.get(worktreeName) ||
-          { worktreeName, branchName: comment.branchName || "unknown", comments: [] };
+          {
+            worktreeName,
+            branchName: comment.branchName || "unknown",
+            isRootWorktree: worktreeName === repoName,
+            comments: [],
+          };
         worktreeGroup.comments.push(comment);
         repoGroup.worktreeMap.set(worktreeName, worktreeGroup);
-        repoMap.set(repoName, repoGroup);
+        repoMap.set(repoKey, repoGroup);
       }
 
       return Array.from(repoMap.values()).map((repoGroup) => ({
+        repoKey: repoGroup.repoKey,
         repoName: repoGroup.repoName,
+        repoPath: repoGroup.repoPath,
         count: repoGroup.count,
         worktrees: Array.from(repoGroup.worktreeMap.values()),
       }));
