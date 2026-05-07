@@ -253,7 +253,7 @@ function makeId(): string {
 
 function buildReviewCopyText(comments: ReviewComment[]): string {
   const lines = comments.map(
-    (item) => `  - @${item.filePath} L${item.line}: ${item.comment}`
+    (item, index) => `  ${index + 1}. @${item.filePath} L${item.line}: ${item.comment}`
   );
 
   return [
@@ -277,12 +277,17 @@ function getWebviewHtml(webview: vscode.Webview): string {
     :root {
       color-scheme: light dark;
     }
+    * {
+      box-sizing: border-box;
+      min-width: 0;
+    }
     body {
       margin: 0;
       padding: 0;
       font-family: var(--vscode-font-family);
       color: var(--vscode-foreground);
       background: var(--vscode-editor-background);
+      overflow-x: hidden;
     }
     .tabs {
       display: flex;
@@ -342,6 +347,7 @@ function getWebviewHtml(webview: vscode.Webview): string {
       font-family: var(--vscode-editor-font-family);
       font-size: 12px;
       overflow-x: auto;
+      max-width: 100%;
       border: 1px solid var(--vscode-panel-border);
     }
     .actions {
@@ -372,6 +378,9 @@ function getWebviewHtml(webview: vscode.Webview): string {
       background: var(--vscode-editor-background);
       border-top: 1px solid var(--vscode-panel-border);
     }
+    .fixed-bar > button {
+      flex: 1;
+    }
     .batch-title {
       font-weight: 600;
       margin-bottom: 6px;
@@ -387,6 +396,23 @@ function getWebviewHtml(webview: vscode.Webview): string {
     .empty {
       opacity: 0.8;
       font-style: italic;
+    }
+    .editor-row {
+      display: grid;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .editor-input {
+      width: 100%;
+      min-height: 64px;
+      resize: vertical;
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border-radius: 6px;
+      padding: 8px;
+      font-family: var(--vscode-font-family);
+      font-size: 12px;
     }
   </style>
 </head>
@@ -404,7 +430,7 @@ function getWebviewHtml(webview: vscode.Webview): string {
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
-    const state = { pending: [], reviews: [], tab: "pending", expandedBatches: {} };
+    const state = { pending: [], reviews: [], tab: "pending", expandedBatches: {}, editingCommentId: null };
 
     const tabPending = document.getElementById("tab-pending");
     const tabReviews = document.getElementById("tab-reviews");
@@ -477,6 +503,7 @@ function getWebviewHtml(webview: vscode.Webview): string {
     }
 
     function renderCommentCard(comment) {
+      const isEditing = state.editingCommentId === comment.id;
       return \`
         <article class="card">
           <div class="meta">
@@ -488,7 +515,13 @@ function getWebviewHtml(webview: vscode.Webview): string {
           <pre class="code">\${escapeHtml(comment.context.join("\\n"))}</pre>
           <div class="actions">
             <button data-open="\${comment.id}">Go to code</button>
-            <button data-edit="\${comment.id}" data-comment="\${encodeURIComponent(comment.comment)}">Edit</button>
+            <button data-edit="\${comment.id}">\${isEditing ? "Close" : "Edit"}</button>
+          </div>
+          <div class="\${isEditing ? "editor-row" : "hidden"}">
+            <textarea class="editor-input" data-editor="\${comment.id}">\${escapeHtml(comment.comment)}</textarea>
+            <div class="actions">
+              <button class="primary" data-save="\${comment.id}">Save</button>
+            </div>
           </div>
         </article>
       \`;
@@ -503,11 +536,21 @@ function getWebviewHtml(webview: vscode.Webview): string {
       root.querySelectorAll("[data-edit]").forEach((btn) => {
         btn.addEventListener("click", () => {
           const commentId = btn.getAttribute("data-edit");
-          const current = decodeURIComponent(btn.getAttribute("data-comment") || "");
-          const next = window.prompt("Edit review comment", current);
-          if (next !== null) {
-            vscode.postMessage({ type: "updateComment", commentId, commentText: next });
+          state.editingCommentId = state.editingCommentId === commentId ? null : commentId;
+          renderPending();
+          renderReviews();
+        });
+      });
+      root.querySelectorAll("[data-save]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const commentId = btn.getAttribute("data-save");
+          const input = root.querySelector(\`[data-editor="\${commentId}"]\`);
+          if (!input) {
+            return;
           }
+          const next = input.value ?? "";
+          vscode.postMessage({ type: "updateComment", commentId, commentText: next });
+          state.editingCommentId = null;
         });
       });
     }
