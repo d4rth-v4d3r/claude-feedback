@@ -37,18 +37,45 @@ jobs:
       - name: Pack extension
         run: npx @vscode/vsce package --no-dependencies
 
+      - name: Capture extension metadata
+        id: metadata
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "vsix=${NAME}-${VERSION}.vsix" >> "$GITHUB_OUTPUT"
+
       - name: Publish to Visual Studio Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
-          NAME="$(node -p "require('./package.json').name")"
-          VERSION="$(node -p "require('./package.json').version")"
-          npx @vscode/vsce publish --packagePath "${NAME}-${VERSION}.vsix"
+          set +e
+          OUTPUT="$(npx @vscode/vsce publish --packagePath "${{ steps.metadata.outputs.vsix }}" 2>&1)"
+          STATUS=$?
+          set -e
+          echo "${OUTPUT}"
+          if [ ${STATUS} -ne 0 ]; then
+            if echo "${OUTPUT}" | grep -qi "already exists"; then
+              echo "VS Marketplace already has ${{ steps.metadata.outputs.name }} v${{ steps.metadata.outputs.version }}. Continuing."
+            else
+              exit ${STATUS}
+            fi
+          fi
 
       - name: Publish to Open VSX
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
-          NAME="$(node -p "require('./package.json').name")"
-          VERSION="$(node -p "require('./package.json').version")"
-          npx ovsx publish --packagePath "${NAME}-${VERSION}.vsix" -p "${OVSX_PAT}"
+          set +e
+          OUTPUT="$(npx ovsx publish --packagePath "${{ steps.metadata.outputs.vsix }}" -p "${OVSX_PAT}" 2>&1)"
+          STATUS=$?
+          set -e
+          echo "${OUTPUT}"
+          if [ ${STATUS} -ne 0 ]; then
+            if echo "${OUTPUT}" | grep -Eqi "already exists|version exists|duplicate"; then
+              echo "Open VSX already has ${{ steps.metadata.outputs.name }} v${{ steps.metadata.outputs.version }}. Continuing."
+            else
+              exit ${STATUS}
+            fi
+          fi
