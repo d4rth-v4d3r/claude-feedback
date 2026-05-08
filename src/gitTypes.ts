@@ -9,6 +9,8 @@ export interface GitAPI {
   readonly repositories: GitRepository[];
   getRepository(uri: vscode.Uri): GitRepository | null;
   toGitUri(uri: vscode.Uri, ref: string): vscode.Uri;
+  /** Present on vscode.git API v1 — used to refresh the pending tree when repos are added. */
+  readonly onDidOpenRepository?: vscode.Event<GitRepository>;
 }
 
 export interface GitRepository {
@@ -17,6 +19,8 @@ export interface GitRepository {
   getMergeBase(ref1: string, ref2: string): Promise<string | undefined>;
   getConfig(key: string): Promise<string>;
   setConfig(key: string, value: string): Promise<string>;
+  /** Present on real vscode.git repos — fire when HEAD, index, or working tree changes. */
+  readonly onDidChangeState?: vscode.Event<unknown>;
 }
 
 interface GitExtensionExports {

@@ -2,7 +2,7 @@
   "name": "cursor-code-review-helper",
   "displayName": "Cursor Code Review Helper",
   "description": "Native PR-style review threads in the editor and a tree view of pending comments per repo/worktree, sent to Claude Code with one click.",
-  "version": "0.0.29",
+  "version": "0.0.31",
   "publisher": "local",
   "engines": {
     "vscode": "^1.98.0"
@@ -20,6 +20,8 @@
     "onCommand:codeReview.sendInCurrentTerminal",
     "onCommand:codeReview.openFileDiff",
     "onCommand:codeReview.setParentBranch",
+    "onCommand:codeReview.configureWorktreeParent",
+    "onCommand:codeReview.clearWorktreeParentOverride",
     "onCommand:codeReview.quickReviewMenu"
   ],
   "main": "./out/extension.js",
@@ -44,7 +46,22 @@
           "type": "string",
           "default": "",
           "scope": "resource",
-          "description": "Fallback parent branch for the diff view (e.g. main, origin/main). Per-branch overrides via `git config branch.<name>.codeReviewParent` always win, and Graphite's `gtParentBranchName` is auto-detected. Leave empty to use origin/HEAD."
+          "description": "Fallback parent for diff/Pending tree (folder‑scoped): applied after toolchain metadata but before origin/HEAD. Precedence wins: VS Code worktree override → branch.<name>.codeReviewParent → Git Town lineage → Graphite gtParentBranchName → @{upstream} when it differs from the default-branch tip → this setting → origin/HEAD."
+        },
+        "codeReview.ghParentBranch": {
+          "type": "string",
+          "enum": [
+            "off",
+            "refineGeneric",
+            "annotate"
+          ],
+          "default": "off",
+          "enumDescriptions": [
+            "Do not invoke the GitHub CLI.",
+            "If the heuristic parent came only from the default-branch fallback and `gh` sees an open PR for this HEAD, swap to the PR base ref.",
+            "Keep heuristic parent; record a tooltip note comparing merge-base vs GitHub PR base when `gh` works."
+          ],
+          "description": "Uses `gh pr view <branch> --json baseRefName` (requires authenticated `gh`)."
         },
         "codeReview.compactFolders": {
           "type": "boolean",
@@ -96,8 +113,18 @@
       },
       {
         "command": "codeReview.setParentBranch",
-        "title": "Code Review: Set Parent Branch for Current Branch…",
+        "title": "Code Review: Set Diff Parent (Git Branch Config)…",
         "icon": "$(git-branch)"
+      },
+      {
+        "command": "codeReview.configureWorktreeParent",
+        "title": "Code Review: Configure Diff Parent (This Worktree)…",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "codeReview.clearWorktreeParentOverride",
+        "title": "Code Review: Clear Worktree-Only Diff Parent Override",
+        "icon": "$(close)"
       },
       {
         "command": "codeReview.clearPending",
@@ -180,6 +207,10 @@
           "group": "1_actions@30"
         },
         {
+          "command": "codeReview.configureWorktreeParent",
+          "group": "1_actions@35"
+        },
+        {
           "command": "codeReview.openSidebar",
           "group": "2_nav@40"
         }
@@ -218,13 +249,23 @@
           "group": "inline@30"
         },
         {
-          "command": "codeReview.setParentBranch",
+          "command": "codeReview.configureWorktreeParent",
           "when": "view == codeReviewPending && viewItem =~ /codeReview\\.worktree/",
           "group": "1_config@10"
         },
         {
+          "command": "codeReview.setParentBranch",
+          "when": "view == codeReviewPending && viewItem =~ /codeReview\\.worktree/",
+          "group": "1_config@20"
+        },
+        {
+          "command": "codeReview.clearWorktreeParentOverride",
+          "when": "view == codeReviewPending && viewItem =~ /withParentOverride/",
+          "group": "1_config@30"
+        },
+        {
           "command": "codeReview.openFileDiff",
-          "when": "view == codeReviewPending && viewItem == codeReview.file",
+          "when": "view == codeReviewPending && viewItem =~ /codeReview\\.file/",
           "group": "inline@10"
         },
         {

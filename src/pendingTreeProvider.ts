@@ -1,7 +1,9 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 import type { ReviewComment } from "./types";
 import type { ReviewStore } from "./store";
+import { getGitApi, type GitRepository } from "./gitTypes";
 
 export type PendingTreeItem = RepoNode | WorktreeNode | DirectoryNode | FileNode;
 
@@ -11,7 +13,10 @@ export class RepoNode {
     readonly repoKey: string,
     readonly repoName: string,
     readonly repoPath: string,
-    readonly count: number,
+    /** Total pending comments in this repo (visible worktrees). */
+    readonly commentCount: number,
+    /** Distinct changed/listed files across worktrees. */
+    readonly changedFileCount: number,
     readonly worktrees: WorktreeNode[]
   ) {}
 }
@@ -24,6 +29,8 @@ export class WorktreeNode {
     readonly branchName: string,
     readonly workspaceFolderPath: string,
     readonly isRootWorktree: boolean,
+    /** Files listed in the tree (only files with pending comments). */
+    readonly changedFileCount: number,
     /** Top-level children of the worktree root: directories and any files at the root. */
     readonly children: PendingChildNode[]
   ) {}
@@ -32,11 +39,13 @@ export class WorktreeNode {
 export class DirectoryNode {
   readonly kind = "directory" as const;
   constructor(
+    /** Stable id segment: normalized git worktree root (unique per checkout). */
+    readonly worktreeKey: string,
     /** Display label, e.g. "packages/restaurant-ui" when single-child chains are compacted. */
     readonly label: string,
     /** Path relative to the worktree root, used as the stable tree id. */
     readonly relativePath: string,
-    readonly count: number,
+    readonly commentCount: number,
     readonly children: PendingChildNode[]
   ) {}
 }
@@ -44,11 +53,18 @@ export class DirectoryNode {
 export class FileNode {
   readonly kind = "file" as const;
   constructor(
+    /** Normalized worktree root; pairs with relativePath for stable TreeItem.id. */
+    readonly worktreeKey: string,
     readonly filePath: string,
     /** Path relative to the worktree root. */
     readonly relativePath: string,
     readonly count: number,
-    readonly workspaceFolderPath: string
+    readonly workspaceFolderPath: string,
+    /**
+     * Git name-status vs merge-base: A/M/D/R/C/U/T, or "" when the file is listed only
+     * because it has pending comments (not in current diff vs parent).
+     */
+    readonly changeStatus: string
   ) {}
 }
 
@@ -58,15 +74,49 @@ export class PendingTreeProvider implements vscode.TreeDataProvider<PendingTreeI
   private readonly emitter = new vscode.EventEmitter<PendingTreeItem | undefined | void>();
   readonly onDidChangeTreeData = this.emitter.event;
   private readonly subscriptions: vscode.Disposable[] = [];
+  /** Coalesce rapid git/UI events so `buildRepoNodes` is not constantly restarted (infinite spinner). */
+  private refreshDebounceTimer: ReturnType<typeof setTimeout> | undefined;
+  private static readonly REFRESH_DEBOUNCE_MS = 350;
 
-  constructor(private readonly store: ReviewStore) {
-    this.subscriptions.push(this.store.onDidChange(() => this.emitter.fire()));
+  constructor(
+    private readonly store: ReviewStore
+  ) {
+    this.subscriptions.push(this.store.onDidChange(() => this.scheduleTreeRefresh()));
     this.subscriptions.push(
-      vscode.workspace.onDidChangeWorkspaceFolders(() => this.emitter.fire())
+      vscode.workspace.onDidChangeWorkspaceFolders(() => this.scheduleTreeRefresh())
     );
+    this.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration("codeReview")) {
+          this.scheduleTreeRefresh();
+        }
+      })
+    );
+    this.subscriptions.push(
+      vscode.workspace.onDidSaveTextDocument((doc) => {
+        if (doc.uri.scheme === "file") {
+          this.scheduleTreeRefresh();
+        }
+      })
+    );
+    void this.attachGitRefresh();
+  }
+
+  private scheduleTreeRefresh(): void {
+    if (this.refreshDebounceTimer !== undefined) {
+      clearTimeout(this.refreshDebounceTimer);
+    }
+    this.refreshDebounceTimer = setTimeout(() => {
+      this.refreshDebounceTimer = undefined;
+      this.emitter.fire();
+    }, PendingTreeProvider.REFRESH_DEBOUNCE_MS);
   }
 
   dispose(): void {
+    if (this.refreshDebounceTimer !== undefined) {
+      clearTimeout(this.refreshDebounceTimer);
+      this.refreshDebounceTimer = undefined;
+    }
     vscode.Disposable.from(...this.subscriptions).dispose();
     this.emitter.dispose();
   }
@@ -84,7 +134,7 @@ export class PendingTreeProvider implements vscode.TreeDataProvider<PendingTreeI
     }
   }
 
-  getChildren(element?: PendingTreeItem): PendingTreeItem[] {
+  getChildren(element?: PendingTreeItem): vscode.ProviderResult<PendingTreeItem[]> {
     if (!element) {
       return this.buildRepoNodes();
     }
@@ -100,13 +150,94 @@ export class PendingTreeProvider implements vscode.TreeDataProvider<PendingTreeI
     return [];
   }
 
-  private buildRepoNodes(): RepoNode[] {
-    const visibleFolders = new Set(
-      (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath)
+  private async attachGitRefresh(): Promise<void> {
+    const git = await getGitApi();
+    if (!git) {
+      return;
+    }
+    const wireRepo = (repo: GitRepository) => {
+      if (repo.onDidChangeState) {
+        this.subscriptions.push(repo.onDidChangeState(() => this.scheduleTreeRefresh()));
+      }
+    };
+    for (const repo of git.repositories) {
+      wireRepo(repo);
+    }
+    if (git.onDidOpenRepository) {
+      this.subscriptions.push(
+        git.onDidOpenRepository((repo) => {
+          wireRepo(repo);
+          this.scheduleTreeRefresh();
+        })
+      );
+    }
+  }
+
+  private async buildRepoNodes(): Promise<RepoNode[]> {
+    const visibleFolderPaths = new Set(
+      (vscode.workspace.workspaceFolders ?? []).map((f) => path.normalize(f.uri.fsPath))
     );
-    const pending = this.store
+    const pendingAll = this.store
       .getActivePending()
-      .filter((c) => visibleFolders.size === 0 || visibleFolders.has(c.workspaceFolderPath));
+      .filter((c) => visibleFolderPaths.has(path.normalize(c.workspaceFolderPath)));
+
+    const compactFolders = vscode.workspace
+      .getConfiguration("codeReview")
+      .get<boolean>("compactFolders", true);
+
+    type WorktreeAgg = {
+      worktreeRoot: string;
+      workspaceFolderPath: string;
+      repoRoot: string;
+      repoName: string;
+      worktreeName: string;
+      branchName: string;
+      comments: ReviewComment[];
+    };
+
+    const byWorktreeRoot = new Map<string, WorktreeAgg>();
+
+    const ensureAgg = (worktreeRoot: string, workspaceFolderPath: string): WorktreeAgg | undefined => {
+      const normalizedRoot = path.normalize(worktreeRoot);
+      let agg = byWorktreeRoot.get(normalizedRoot);
+      if (agg) {
+        return agg;
+      }
+      const id = getRepoIdentity(normalizedRoot);
+      agg = {
+        worktreeRoot: normalizedRoot,
+        workspaceFolderPath,
+        repoRoot: id.repoRoot,
+        repoName: id.repoName,
+        worktreeName: id.worktreeName,
+        branchName: getBranchName(normalizedRoot),
+        comments: [],
+      };
+      byWorktreeRoot.set(normalizedRoot, agg);
+      return agg;
+    };
+
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      const wt = tryGetWorktreeRoot(folder.uri.fsPath);
+      if (!wt) {
+        continue;
+      }
+      ensureAgg(wt, folder.uri.fsPath);
+    }
+
+    for (const c of pendingAll) {
+      const wt = tryGetWorktreeRoot(path.dirname(c.filePath));
+      if (!wt) {
+        continue;
+      }
+      if (!visibleFolderPaths.has(path.normalize(c.workspaceFolderPath))) {
+        continue;
+      }
+      const agg = ensureAgg(wt, c.workspaceFolderPath);
+      if (agg) {
+        agg.comments.push(c);
+      }
+    }
 
     const repoMap = new Map<
       string,
@@ -114,91 +245,114 @@ export class PendingTreeProvider implements vscode.TreeDataProvider<PendingTreeI
         repoKey: string;
         repoName: string;
         repoPath: string;
-        count: number;
-        worktreeMap: Map<
-          string,
-          {
-            worktreeName: string;
-            branchName: string;
-            workspaceFolderPath: string;
-            isRootWorktree: boolean;
-            comments: ReviewComment[];
-          }
-        >;
+        commentCount: number;
+        changedFileCount: number;
+        worktreeMap: Map<string, WorktreeAgg>;
       }
     >();
 
-    for (const c of pending) {
-      const repoPath = c.repoPath || "";
-      const repoKey = repoPath || c.repoName || "Unknown Repo";
+    for (const agg of byWorktreeRoot.values()) {
+      const repoKey = agg.repoRoot;
       const repoEntry =
         repoMap.get(repoKey) ??
         {
           repoKey,
-          repoName: c.repoName || "Unknown Repo",
-          repoPath,
-          count: 0,
-          worktreeMap: new Map(),
+          repoName: agg.repoName,
+          repoPath: agg.repoRoot,
+          commentCount: 0,
+          changedFileCount: 0,
+          worktreeMap: new Map<string, WorktreeAgg>(),
         };
-      repoEntry.count += 1;
-
-      const worktreeName = c.worktreeName || "Unknown Worktree";
-      const worktreeEntry =
-        repoEntry.worktreeMap.get(worktreeName) ??
-        {
-          worktreeName,
-          branchName: c.branchName || "unknown",
-          workspaceFolderPath: c.workspaceFolderPath,
-          isRootWorktree: worktreeName === repoEntry.repoName,
-          comments: [],
-        };
-      worktreeEntry.comments.push(c);
-
-      repoEntry.worktreeMap.set(worktreeName, worktreeEntry);
+      repoEntry.worktreeMap.set(agg.worktreeRoot, agg);
       repoMap.set(repoKey, repoEntry);
     }
 
-    const compactFolders = vscode.workspace
-      .getConfiguration("codeReview")
-      .get<boolean>("compactFolders", true);
+    for (const c of pendingAll) {
+      const repoEntry = repoMap.get(getRepoIdentityFromFile(c.filePath).repoRoot);
+      if (repoEntry) {
+        repoEntry.commentCount += 1;
+      }
+    }
 
-    return Array.from(repoMap.values()).map((repo) => {
-      const worktrees = Array.from(repo.worktreeMap.values()).map((w) => {
-        const dirEntry = buildDirEntry(w.comments);
+    const repos: RepoNode[] = [];
+    for (const repo of repoMap.values()) {
+      const worktrees: WorktreeNode[] = [];
+      let repoChangedFiles = 0;
+
+      for (const w of repo.worktreeMap.values()) {
+        const relPaths = new Set<string>();
+        for (const c of w.comments) {
+          relPaths.add(normRelPath(c.relativePath));
+        }
+
+        const fileInfos = new Map<string, { filePath: string; count: number; changeStatus: string }>();
+        for (const rel of relPaths) {
+          const abs = path.join(w.worktreeRoot, ...rel.split("/").filter(Boolean));
+          const count = w.comments.filter((c) => normRelPath(c.relativePath) === rel).length;
+          fileInfos.set(rel, { filePath: abs, count, changeStatus: "" });
+        }
+
+        const dirEntry = buildDirEntryFromFiles(fileInfos);
+        const worktreeKey = path.normalize(w.worktreeRoot);
         const children = toTreeChildren(
           dirEntry,
           "",
+          worktreeKey,
           w.workspaceFolderPath,
           compactFolders
         );
-        return new WorktreeNode(
-          `${repo.repoKey}::${w.worktreeName}`,
-          w.worktreeName,
-          w.branchName,
-          w.workspaceFolderPath,
-          w.isRootWorktree,
-          children
+        const changedFileCount = relPaths.size;
+        repoChangedFiles += changedFileCount;
+        worktrees.push(
+          new WorktreeNode(
+            worktreeKey,
+            w.worktreeName,
+            w.branchName,
+            w.workspaceFolderPath,
+            w.worktreeName === repo.repoName,
+            changedFileCount,
+            children
+          )
         );
-      });
+      }
+
+      if (!worktrees.length) {
+        continue;
+      }
       worktrees.sort((a, b) => a.worktreeName.localeCompare(b.worktreeName));
-      return new RepoNode(repo.repoKey, repo.repoName, repo.repoPath, repo.count, worktrees);
-    });
+      repo.changedFileCount = repoChangedFiles;
+      repos.push(
+        new RepoNode(
+          repo.repoKey,
+          repo.repoName,
+          repo.repoPath,
+          repo.commentCount,
+          repo.changedFileCount,
+          worktrees
+        )
+      );
+    }
+
+    return repos;
   }
 }
 
 // ---------- Directory tree construction ----------
 
 type DirEntry = {
-  /** Subdirectories keyed by their single segment name. */
   readonly dirs: Map<string, DirEntry>;
-  /** Files at this directory level, keyed by basename. */
-  readonly files: Map<string, { filePath: string; count: number }>;
+  readonly files: Map<
+    string,
+    { filePath: string; count: number; changeStatus: string }
+  >;
 };
 
-function buildDirEntry(comments: ReviewComment[]): DirEntry {
+function buildDirEntryFromFiles(
+  files: Map<string, { filePath: string; count: number; changeStatus: string }>
+): DirEntry {
   const root: DirEntry = { dirs: new Map(), files: new Map() };
-  for (const c of comments) {
-    const segments = (c.relativePath || "").split(/[\\/]+/).filter(Boolean);
+  for (const [relKey, info] of files) {
+    const segments = relKey.split("/").filter(Boolean);
     if (segments.length === 0) {
       continue;
     }
@@ -212,12 +366,11 @@ function buildDirEntry(comments: ReviewComment[]): DirEntry {
       }
       cursor = next;
     }
-    const existing = cursor.files.get(fileName);
-    if (existing) {
-      existing.count += 1;
-    } else {
-      cursor.files.set(fileName, { filePath: c.filePath, count: 1 });
-    }
+    cursor.files.set(fileName, {
+      filePath: path.normalize(info.filePath),
+      count: info.count,
+      changeStatus: info.changeStatus,
+    });
   }
   return root;
 }
@@ -225,6 +378,7 @@ function buildDirEntry(comments: ReviewComment[]): DirEntry {
 function toTreeChildren(
   entry: DirEntry,
   parentRelative: string,
+  worktreeKey: string,
   workspaceFolderPath: string,
   compact: boolean
 ): PendingChildNode[] {
@@ -245,16 +399,29 @@ function toTreeChildren(
     }
     const label = labelSegments.join("/");
     const relPath = relSegments.join("/");
-    const childCount = countComments(cursor);
-    const children = toTreeChildren(cursor, relPath, workspaceFolderPath, compact);
-    out.push(new DirectoryNode(label, relPath, childCount, children));
+    const commentCount = countComments(cursor);
+    const children = toTreeChildren(cursor, relPath, worktreeKey, workspaceFolderPath, compact);
+    out.push(new DirectoryNode(worktreeKey, label, relPath, commentCount, children));
   }
 
   const fileNames = Array.from(entry.files.keys()).sort((a, b) => a.localeCompare(b));
   for (const name of fileNames) {
-    const info = entry.files.get(name) as { filePath: string; count: number };
+    const info = entry.files.get(name) as {
+      filePath: string;
+      count: number;
+      changeStatus: string;
+    };
     const relPath = parentRelative ? `${parentRelative}/${name}` : name;
-    out.push(new FileNode(info.filePath, relPath, info.count, workspaceFolderPath));
+    out.push(
+      new FileNode(
+        worktreeKey,
+        info.filePath,
+        relPath,
+        info.count,
+        workspaceFolderPath,
+        info.changeStatus
+      )
+    );
   }
 
   return out;
@@ -271,31 +438,131 @@ function countComments(entry: DirEntry): number {
   return total;
 }
 
+// ---------- Git + path helpers ----------
+
+function normRelPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+/** `cwd` must be an existing directory (workspace folder, or `path.dirname(filePath)` for a tracked file). */
+function tryGetWorktreeRoot(cwd: string): string | undefined {
+  try {
+    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return root ? path.normalize(root) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getRepoIdentity(worktreeRoot: string): {
+  repoRoot: string;
+  repoName: string;
+  worktreeName: string;
+} {
+  try {
+    const commonGitDir = execFileSync(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      {
+        cwd: worktreeRoot,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }
+    ).trim();
+    const repoRoot = path.normalize(path.dirname(commonGitDir));
+    return {
+      repoRoot,
+      repoName: path.basename(repoRoot),
+      worktreeName: path.basename(path.normalize(worktreeRoot)),
+    };
+  } catch {
+    const wr = path.normalize(worktreeRoot);
+    const base = path.basename(wr);
+    return { repoRoot: wr, repoName: base, worktreeName: base };
+  }
+}
+
+function getRepoIdentityFromFile(filePath: string): {
+  repoRoot: string;
+  repoName: string;
+  worktreeName: string;
+} {
+  const wt = tryGetWorktreeRoot(path.dirname(filePath));
+  if (wt) {
+    return getRepoIdentity(wt);
+  }
+  return getRepoIdentity(path.dirname(filePath));
+}
+
+function getBranchName(repoPath: string): string {
+  try {
+    return (
+      execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+        cwd: repoPath,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim() || "unknown"
+    );
+  } catch {
+    return "unknown";
+  }
+}
+
 // ---------- Tree item renderers ----------
 
 function repoTreeItem(node: RepoNode): vscode.TreeItem {
   const item = new vscode.TreeItem(node.repoName, vscode.TreeItemCollapsibleState.Expanded);
+  item.id = `repo::${node.repoKey}`;
   item.iconPath = new vscode.ThemeIcon("repo");
-  item.description = formatCount(node.count);
+  const parts: string[] = [];
+  if (node.changedFileCount > 0) {
+    parts.push(`${node.changedFileCount} file${node.changedFileCount === 1 ? "" : "s"}`);
+  }
+  if (node.commentCount > 0) {
+    parts.push(formatCount(node.commentCount));
+  }
+  item.description = parts.length ? parts.join(" · ") : undefined;
   item.tooltip = node.repoPath || node.repoName;
   item.contextValue = "codeReview.repo";
   return item;
 }
 
 function worktreeTreeItem(node: WorktreeNode): vscode.TreeItem {
-  const total = sumChildCounts(node.children);
-  const item = new vscode.TreeItem(node.worktreeName, vscode.TreeItemCollapsibleState.Expanded);
+  const totalComments = sumChildCommentCounts(node.children);
+  const collapsible =
+    node.children.length > 0 ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None;
+  const item = new vscode.TreeItem(node.worktreeName, collapsible);
+  item.id = `wt::${node.worktreeKey}`;
   item.iconPath = new vscode.ThemeIcon("git-branch");
-  item.description = `${node.branchName} · ${formatCount(total)}`;
-  item.tooltip = `${node.worktreeName} on ${node.branchName}\n${node.workspaceFolderPath}`;
+  const pieces: string[] = [
+    node.branchName,
+    `${node.changedFileCount} file${node.changedFileCount === 1 ? "" : "s"}`,
+  ];
+  if (totalComments > 0) {
+    pieces.push(formatCount(totalComments));
+  }
+  item.description = pieces.join(" · ");
+  const tooltipLines = [
+    `${node.worktreeName} on ${node.branchName}`,
+    node.workspaceFolderPath,
+  ];
+  item.tooltip = tooltipLines.join("\n");
   item.contextValue = node.isRootWorktree ? "codeReview.worktree.root" : "codeReview.worktree";
   return item;
 }
 
-function sumChildCounts(children: PendingChildNode[]): number {
+function sumChildCommentCounts(children: PendingChildNode[]): number {
   let total = 0;
   for (const child of children) {
-    total += child.count;
+    if (child.kind === "directory") {
+      total += sumChildCommentCounts(child.children);
+    } else {
+      total += child.count;
+    }
   }
   return total;
 }
@@ -303,10 +570,10 @@ function sumChildCounts(children: PendingChildNode[]): number {
 function directoryTreeItem(node: DirectoryNode): vscode.TreeItem {
   const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.Expanded);
   item.iconPath = vscode.ThemeIcon.Folder;
-  item.description = formatCount(node.count);
+  item.description = node.commentCount > 0 ? formatCount(node.commentCount) : undefined;
   item.tooltip = node.relativePath;
   item.contextValue = "codeReview.directory";
-  item.id = `dir::${node.relativePath}`;
+  item.id = `dir::${node.worktreeKey}::${normRelPath(node.relativePath)}`;
   return item;
 }
 
@@ -314,14 +581,90 @@ function fileTreeItem(node: FileNode): vscode.TreeItem {
   const fileName = path.basename(node.filePath);
   const item = new vscode.TreeItem(fileName, vscode.TreeItemCollapsibleState.None);
   item.resourceUri = vscode.Uri.file(node.filePath);
-  item.tooltip = `${node.relativePath} · ${formatCount(node.count)}`;
-  item.contextValue = "codeReview.file";
+  item.iconPath = fileStatusIcon(node.changeStatus, node.count);
+  item.description = fileTrailingIndicators(node);
+  item.tooltip = fileTooltipText(node);
+  item.contextValue = node.changeStatus === "D" ? "codeReview.file.deleted" : "codeReview.file";
+  item.id = `file::${node.worktreeKey}::${normRelPath(node.relativePath)}`;
   item.command = {
     command: "codeReview.openFileDiff",
     title: "Open Diff vs Parent Branch",
     arguments: [vscode.Uri.file(node.filePath)],
   };
   return item;
+}
+
+/** Right-aligned column: comment badge (if any), then git letter (last). */
+function fileTrailingIndicators(node: FileNode): string | undefined {
+  const badge = commentCountBadge(node.count);
+  const st = node.changeStatus.trim();
+  if (badge && st) {
+    return `${badge}\u202f${st}`;
+  }
+  if (badge) {
+    return badge;
+  }
+  if (st) {
+    return st;
+  }
+  return undefined;
+}
+
+function fileStatusIcon(changeStatus: string, commentCount: number): vscode.ThemeIcon {
+  const st = changeStatus.trim();
+  if (!st) {
+    if (commentCount > 0) {
+      return new vscode.ThemeIcon(
+        "comment-discussion",
+        new vscode.ThemeColor("gitDecoration.modifiedResourceForeground")
+      );
+    }
+    return vscode.ThemeIcon.File;
+  }
+  switch (st) {
+    case "A":
+      return new vscode.ThemeIcon("diff-added", new vscode.ThemeColor("gitDecoration.addedResourceForeground"));
+    case "M":
+      return new vscode.ThemeIcon(
+        "diff-modified",
+        new vscode.ThemeColor("gitDecoration.modifiedResourceForeground")
+      );
+    case "D":
+      return new vscode.ThemeIcon("diff-removed", new vscode.ThemeColor("gitDecoration.deletedResourceForeground"));
+    case "R":
+      return new vscode.ThemeIcon("diff-renamed", new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"));
+    case "C":
+      return new vscode.ThemeIcon("diff-modified", new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"));
+    case "U":
+      return new vscode.ThemeIcon("warning", new vscode.ThemeColor("gitDecoration.conflictingResourceForeground"));
+    default:
+      return new vscode.ThemeIcon("diff-modified", new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"));
+  }
+}
+
+function fileTooltipText(node: FileNode): string {
+  const lines: string[] = [];
+  const st = node.changeStatus.trim();
+  if (st) {
+    lines.push(`Git status ${st} vs parent merge-base.`);
+  } else if (node.count > 0) {
+    lines.push("Pending comments only (file not in current diff vs parent).");
+  }
+  lines.push(node.relativePath);
+  if (node.count > 0) {
+    lines.push(formatCount(node.count));
+  }
+  return lines.join("\n");
+}
+
+function commentCountBadge(n: number): string | undefined {
+  if (n <= 0) {
+    return undefined;
+  }
+  if (n >= 10) {
+    return "10+";
+  }
+  return String(n);
 }
 
 function formatCount(n: number): string {

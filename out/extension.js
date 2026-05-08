@@ -24,13 +24,13 @@ const CLAUDE_FALLBACK_PASTE_DELAY_MS = 3800;
 function activate(context) {
     const store = new store_1.ReviewStore(context);
     const locator = new LocationMetadataResolver();
-    const parentResolver = new parentBranchResolver_1.ParentBranchResolver();
+    const parentResolver = new parentBranchResolver_1.ParentBranchResolver(context.workspaceState);
     const commentsController = new reviewCommentsController_1.ReviewCommentsController(store, async (uri, line, body) => {
         await addCommentForUriAndLine(store, locator, uri, line, body);
     });
     const pendingTree = new pendingTreeProvider_1.PendingTreeProvider(store);
     const resolvedTree = new resolvedTreeProvider_1.ResolvedTreeProvider(store);
-    context.subscriptions.push(commentsController, pendingTree, resolvedTree);
+    context.subscriptions.push(parentResolver, commentsController, pendingTree, resolvedTree);
     context.subscriptions.push(vscode.window.registerTreeDataProvider("codeReviewPending", pendingTree), vscode.window.registerTreeDataProvider("codeReviewResolved", resolvedTree));
     // --- Commands ---
     context.subscriptions.push(vscode.commands.registerCommand("codeReview.openSidebar", async () => {
@@ -88,7 +88,13 @@ function activate(context) {
         }
     }));
     context.subscriptions.push(vscode.commands.registerCommand("codeReview.setParentBranch", async (target) => {
-        await setParentBranchInteractive(parentResolver, target);
+        await setBranchGitParentInteractive(parentResolver, target);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("codeReview.configureWorktreeParent", async (target) => {
+        await configureWorktreeParentInteractive(parentResolver, target);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("codeReview.clearWorktreeParentOverride", async (target) => {
+        await clearWorktreeParentOverrideInteractive(parentResolver, target);
     }));
     // --- Send / clear / rollback (preserve existing UX) ---
     context.subscriptions.push(vscode.commands.registerCommand("codeReview.sendForReview", async (target) => {
@@ -329,32 +335,42 @@ async function commitReviewBatch(store, targetComments, copiedText, workspaceFol
             : state.pending.filter((c) => !idsToRemove.has(c.id));
     });
 }
-// ---------- Parent branch interactive setter ----------
-async function setParentBranchInteractive(resolver, target) {
-    let probeUri;
+// ---------- Diff parent (git + worktree overlays) ----------
+async function probeUriForRepo(target) {
     if (target instanceof vscode.Uri) {
-        probeUri = target;
+        return target;
     }
-    else if (target && "workspaceFolderPath" in target) {
-        probeUri = vscode.Uri.file(target.workspaceFolderPath);
+    if (target && "workspaceFolderPath" in target) {
+        return vscode.Uri.file(target.workspaceFolderPath);
     }
-    else {
-        probeUri = vscode.window.activeTextEditor?.document.uri;
-        if (!probeUri) {
-            const folder = vscode.workspace.workspaceFolders?.[0];
-            probeUri = folder?.uri;
-        }
+    let probeUri = vscode.window.activeTextEditor?.document.uri;
+    if (!probeUri) {
+        probeUri = vscode.workspace.workspaceFolders?.[0]?.uri;
     }
+    return probeUri;
+}
+function resolveWorktreeRoot(target) {
+    if (target) {
+        return target.worktreeKey;
+    }
+    const probeUri = vscode.window.activeTextEditor?.document.uri ?? vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!probeUri) {
+        return undefined;
+    }
+    return (0, parentBranchResolver_1.gitWorktreeRootForUri)(probeUri);
+}
+async function setBranchGitParentInteractive(resolver, target) {
+    const probeUri = await probeUriForRepo(target);
     if (!probeUri) {
         vscode.window.showWarningMessage("Open a file in the target repo before setting its parent branch.");
         return;
     }
     const current = await resolver.resolve(probeUri);
     const next = await vscode.window.showInputBox({
-        title: "Set parent branch for diff",
+        title: "Set diff parent (git branch config)",
         prompt: current
-            ? `On branch ${current.branchName} · current parent: ${current.parentRef} (${current.source})`
-            : "Enter the parent branch (e.g. main, origin/main, parent-feature-branch)",
+            ? `Writes git config branch.${current.branchName}.codeReviewParent. Current: ${current.parentRef} (from ${current.source})`
+            : "Enter the parent ref for diffs (main, origin/main, parent-feature-branch, …)",
         value: current?.parentRef ?? "main",
         ignoreFocusOut: true,
         validateInput: (v) => (v.trim().length === 0 ? "Parent ref cannot be empty." : undefined),
@@ -367,7 +383,111 @@ async function setParentBranchInteractive(resolver, target) {
         vscode.window.showWarningMessage("Could not set parent branch (no git repo, or branch is detached).");
         return;
     }
-    vscode.window.showInformationMessage(`Parent branch set to '${next.trim()}'.`);
+    const key = current ? `branch.${current.branchName}.codeReviewParent` : "branch.<name>.codeReviewParent";
+    vscode.window.showInformationMessage(`Saved ${key} = '${next.trim()}'.`);
+}
+async function configureWorktreeParentInteractive(resolver, target) {
+    const wtRoot = resolveWorktreeRoot(target);
+    if (!wtRoot) {
+        vscode.window.showWarningMessage("Could not resolve a Git worktree. Open the repo in your workspace or use the command from a worktree row.");
+        return;
+    }
+    const probe = vscode.Uri.file(wtRoot);
+    const preview = await resolver.resolve(probe);
+    const suggestions = await resolver.suggestParents(probe);
+    const rows = [];
+    for (const s of suggestions) {
+        const src = s.sources.map((x) => parentBranchResolver_1.ParentBranchResolver.formatSourceLabel(x)).join(" · ");
+        rows.push({
+            label: s.ref,
+            description: src.length ? src : undefined,
+            detail: "Stores a VS Code worktree-only override (this checkout path — not synced via git clone).",
+            action: "useRef",
+            ref: s.ref,
+        });
+    }
+    rows.push({ label: "", kind: vscode.QuickPickItemKind.Separator });
+    if (resolver.hasWorktreeOverride(wtRoot)) {
+        rows.push({
+            label: "$(trash) Clear worktree-only override",
+            description: "Remove VS Code workspace state for this worktree root",
+            action: "clear",
+        });
+    }
+    rows.push({
+        label: "$(edit) Type a custom parent ref…",
+        description: "Any ref git merge-base understands (saved as worktree override)",
+        action: "custom",
+    });
+    rows.push({
+        label: "$(git-branch) Set parent in Git for this branch…",
+        description: "Writes branch.<name>.codeReviewParent instead (portable)",
+        action: "gitBranchConfig",
+    });
+    const chosenRaw = await vscode.window.showQuickPick(rows, {
+        title: preview !== undefined
+            ? `Configure diff parent — ${preview.branchName}`
+            : "Configure diff parent for this worktree",
+        ignoreFocusOut: true,
+        placeHolder: preview !== undefined ? `Resolved now: ${preview.parentRef} (${preview.source})` : "Pick a parent ref…",
+    });
+    const chosen = chosenRaw;
+    if (!chosen || !("action" in chosen)) {
+        return;
+    }
+    if (chosen.action === "clear") {
+        const cleared = await resolver.clearWorktreeOverride(wtRoot);
+        if (cleared) {
+            vscode.window.showInformationMessage("Cleared VS Code parent override for this worktree.");
+        }
+        return;
+    }
+    if (chosen.action === "gitBranchConfig") {
+        await setBranchGitParentInteractive(resolver, vscode.Uri.file(wtRoot));
+        return;
+    }
+    if (chosen.action === "useRef" && chosen.ref) {
+        const ok = await resolver.setWorktreeOverride(wtRoot, chosen.ref.trim());
+        if (ok) {
+            vscode.window.showInformationMessage(`Worktree parent saved: ${chosen.ref.trim()}`);
+        }
+        else {
+            vscode.window.showWarningMessage("Workspace state is unavailable; cannot save worktree parent.");
+        }
+        return;
+    }
+    if (chosen.action === "custom") {
+        const custom = await vscode.window.showInputBox({
+            title: "Custom parent ref (worktree-only)",
+            value: preview?.parentRef ?? "origin/main",
+            ignoreFocusOut: true,
+            validateInput: (v) => (v.trim().length === 0 ? "Ref cannot be empty." : undefined),
+        });
+        if (custom === undefined) {
+            return;
+        }
+        const ok = await resolver.setWorktreeOverride(wtRoot, custom.trim());
+        if (ok) {
+            vscode.window.showInformationMessage(`Worktree parent saved: ${custom.trim()}`);
+        }
+        else {
+            vscode.window.showWarningMessage("Workspace state is unavailable; cannot save worktree parent.");
+        }
+    }
+}
+async function clearWorktreeParentOverrideInteractive(resolver, target) {
+    const wtRoot = resolveWorktreeRoot(target);
+    if (!wtRoot) {
+        vscode.window.showWarningMessage("Could not resolve a Git worktree. Run this from Pending on a worktree row or open a file inside the checkout.");
+        return;
+    }
+    const cleared = await resolver.clearWorktreeOverride(wtRoot);
+    if (cleared) {
+        vscode.window.showInformationMessage("Cleared VS Code worktree-only parent override.");
+    }
+    else {
+        vscode.window.showInformationMessage("No worktree-only override was set for this checkout.");
+    }
 }
 // ---------- Send pipeline plumbing (kept verbatim from old extension) ----------
 function sleep(ms) {
