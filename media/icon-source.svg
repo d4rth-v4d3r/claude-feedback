@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="bgGlow" cx="50%" cy="45%" r="55%">
+      <stop offset="0%" stop-color="#1d3557" />
+      <stop offset="100%" stop-color="#0b1220" />
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="88" fill="url(#bgGlow)" />
+
+  <!-- lighthouse -->
+  <polygon points="220,382 292,382 274,182 238,182" fill="#f3f4f6"/>
+  <polygon points="230,182 282,182 268,152 244,152" fill="#e5e7eb"/>
+  <circle cx="256" cy="153" r="11" fill="#f59e0b"/>
+  <rect x="248" y="226" width="16" height="16" rx="2" fill="#1f2937"/>
+  <rect x="248" y="262" width="16" height="16" rx="2" fill="#1f2937"/>
+  <rect x="248" y="298" width="16" height="16" rx="2" fill="#1f2937"/>
+  <rect x="200" y="382" width="112" height="24" rx="4" fill="#9ca3af"/>
+
+  <!-- light beams / coding guidance -->
+  <polygon points="266,153 430,92 430,122 286,166" fill="#2dd4bf" fill-opacity="0.88"/>
+  <polygon points="246,153 82,92 82,122 226,166" fill="#2dd4bf" fill-opacity="0.88"/>
+
+  <!-- subtle <> brackets -->
+  <polyline points="416,96 394,106 416,116" fill="none" stroke="#99f6e4" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="96,96 118,106 96,116" fill="none" stroke="#99f6e4" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- code lines -->
+  <rect x="140" y="422" width="232" height="16" rx="6" fill="#334155"/>
+  <rect x="168" y="448" width="176" height="16" rx="6" fill="#475569"/>
+</svg>

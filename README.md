@@ -2,6 +2,12 @@
 
 Collect line-level code review comments from the editor, keep them in a sidebar, and copy a formatted batch for async review.
 
+## Demo
+
+Screen recording sped up 3× for a shorter loop:
+
+![Claude Feedback demo](media/demo.gif)
+
 ## Features
 
 - Add a comment from the editor context menu: `Code Review: Add Comment Here`
