@@ -260,7 +260,7 @@
         },
         {
           "command": "codeReview.clearWorktreeParentOverride",
-          "when": "view == codeReviewPending && viewItem =~ /withParentOverride/",
+          "when": "view == codeReviewPending && viewItem =~ /codeReview\\.worktree/",
           "group": "1_config@30"
         },
         {

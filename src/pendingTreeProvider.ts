@@ -15,7 +15,7 @@ export class RepoNode {
     readonly repoPath: string,
     /** Total pending comments in this repo (visible worktrees). */
     readonly commentCount: number,
-    /** Distinct changed/listed files across worktrees. */
+    /** Distinct files with pending comments across worktrees. */
     readonly changedFileCount: number,
     readonly worktrees: WorktreeNode[]
   ) {}
@@ -59,12 +59,7 @@ export class FileNode {
     /** Path relative to the worktree root. */
     readonly relativePath: string,
     readonly count: number,
-    readonly workspaceFolderPath: string,
-    /**
-     * Git name-status vs merge-base: A/M/D/R/C/U/T, or "" when the file is listed only
-     * because it has pending comments (not in current diff vs parent).
-     */
-    readonly changeStatus: string
+    readonly workspaceFolderPath: string
   ) {}
 }
 
@@ -285,11 +280,11 @@ export class PendingTreeProvider implements vscode.TreeDataProvider<PendingTreeI
           relPaths.add(normRelPath(c.relativePath));
         }
 
-        const fileInfos = new Map<string, { filePath: string; count: number; changeStatus: string }>();
+        const fileInfos = new Map<string, { filePath: string; count: number }>();
         for (const rel of relPaths) {
           const abs = path.join(w.worktreeRoot, ...rel.split("/").filter(Boolean));
           const count = w.comments.filter((c) => normRelPath(c.relativePath) === rel).length;
-          fileInfos.set(rel, { filePath: abs, count, changeStatus: "" });
+          fileInfos.set(rel, { filePath: abs, count });
         }
 
         const dirEntry = buildDirEntryFromFiles(fileInfos);
@@ -341,15 +336,10 @@ export class PendingTreeProvider implements vscode.TreeDataProvider<PendingTreeI
 
 type DirEntry = {
   readonly dirs: Map<string, DirEntry>;
-  readonly files: Map<
-    string,
-    { filePath: string; count: number; changeStatus: string }
-  >;
+  readonly files: Map<string, { filePath: string; count: number }>;
 };
 
-function buildDirEntryFromFiles(
-  files: Map<string, { filePath: string; count: number; changeStatus: string }>
-): DirEntry {
+function buildDirEntryFromFiles(files: Map<string, { filePath: string; count: number }>): DirEntry {
   const root: DirEntry = { dirs: new Map(), files: new Map() };
   for (const [relKey, info] of files) {
     const segments = relKey.split("/").filter(Boolean);
@@ -369,7 +359,6 @@ function buildDirEntryFromFiles(
     cursor.files.set(fileName, {
       filePath: path.normalize(info.filePath),
       count: info.count,
-      changeStatus: info.changeStatus,
     });
   }
   return root;
@@ -406,22 +395,9 @@ function toTreeChildren(
 
   const fileNames = Array.from(entry.files.keys()).sort((a, b) => a.localeCompare(b));
   for (const name of fileNames) {
-    const info = entry.files.get(name) as {
-      filePath: string;
-      count: number;
-      changeStatus: string;
-    };
+    const info = entry.files.get(name) as { filePath: string; count: number };
     const relPath = parentRelative ? `${parentRelative}/${name}` : name;
-    out.push(
-      new FileNode(
-        worktreeKey,
-        info.filePath,
-        relPath,
-        info.count,
-        workspaceFolderPath,
-        info.changeStatus
-      )
-    );
+    out.push(new FileNode(worktreeKey, info.filePath, relPath, info.count, workspaceFolderPath));
   }
 
   return out;
@@ -581,10 +557,13 @@ function fileTreeItem(node: FileNode): vscode.TreeItem {
   const fileName = path.basename(node.filePath);
   const item = new vscode.TreeItem(fileName, vscode.TreeItemCollapsibleState.None);
   item.resourceUri = vscode.Uri.file(node.filePath);
-  item.iconPath = fileStatusIcon(node.changeStatus, node.count);
-  item.description = fileTrailingIndicators(node);
+  item.iconPath = new vscode.ThemeIcon(
+    "comment-discussion",
+    new vscode.ThemeColor("gitDecoration.modifiedResourceForeground")
+  );
+  item.description = commentCountBadge(node.count);
   item.tooltip = fileTooltipText(node);
-  item.contextValue = node.changeStatus === "D" ? "codeReview.file.deleted" : "codeReview.file";
+  item.contextValue = "codeReview.file";
   item.id = `file::${node.worktreeKey}::${normRelPath(node.relativePath)}`;
   item.command = {
     command: "codeReview.openFileDiff",
@@ -594,62 +573,8 @@ function fileTreeItem(node: FileNode): vscode.TreeItem {
   return item;
 }
 
-/** Right-aligned column: comment badge (if any), then git letter (last). */
-function fileTrailingIndicators(node: FileNode): string | undefined {
-  const badge = commentCountBadge(node.count);
-  const st = node.changeStatus.trim();
-  if (badge && st) {
-    return `${badge}\u202f${st}`;
-  }
-  if (badge) {
-    return badge;
-  }
-  if (st) {
-    return st;
-  }
-  return undefined;
-}
-
-function fileStatusIcon(changeStatus: string, commentCount: number): vscode.ThemeIcon {
-  const st = changeStatus.trim();
-  if (!st) {
-    if (commentCount > 0) {
-      return new vscode.ThemeIcon(
-        "comment-discussion",
-        new vscode.ThemeColor("gitDecoration.modifiedResourceForeground")
-      );
-    }
-    return vscode.ThemeIcon.File;
-  }
-  switch (st) {
-    case "A":
-      return new vscode.ThemeIcon("diff-added", new vscode.ThemeColor("gitDecoration.addedResourceForeground"));
-    case "M":
-      return new vscode.ThemeIcon(
-        "diff-modified",
-        new vscode.ThemeColor("gitDecoration.modifiedResourceForeground")
-      );
-    case "D":
-      return new vscode.ThemeIcon("diff-removed", new vscode.ThemeColor("gitDecoration.deletedResourceForeground"));
-    case "R":
-      return new vscode.ThemeIcon("diff-renamed", new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"));
-    case "C":
-      return new vscode.ThemeIcon("diff-modified", new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"));
-    case "U":
-      return new vscode.ThemeIcon("warning", new vscode.ThemeColor("gitDecoration.conflictingResourceForeground"));
-    default:
-      return new vscode.ThemeIcon("diff-modified", new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"));
-  }
-}
-
 function fileTooltipText(node: FileNode): string {
-  const lines: string[] = [];
-  const st = node.changeStatus.trim();
-  if (st) {
-    lines.push(`Git status ${st} vs parent merge-base.`);
-  } else if (node.count > 0) {
-    lines.push("Pending comments only (file not in current diff vs parent).");
-  }
+  const lines: string[] = ["Pending comments file."];
   lines.push(node.relativePath);
   if (node.count > 0) {
     lines.push(formatCount(node.count));

@@ -9,7 +9,7 @@ class RepoNode {
     constructor(repoKey, repoName, repoPath, 
     /** Total pending comments in this repo (visible worktrees). */
     commentCount, 
-    /** Distinct changed/listed files across worktrees. */
+    /** Distinct files with pending comments across worktrees. */
     changedFileCount, worktrees) {
         this.repoKey = repoKey;
         this.repoName = repoName;
@@ -60,18 +60,12 @@ class FileNode {
     /** Normalized worktree root; pairs with relativePath for stable TreeItem.id. */
     worktreeKey, filePath, 
     /** Path relative to the worktree root. */
-    relativePath, count, workspaceFolderPath, 
-    /**
-     * Git name-status vs merge-base: A/M/D/R/C/U/T, or "" when the file is listed only
-     * because it has pending comments (not in current diff vs parent).
-     */
-    changeStatus) {
+    relativePath, count, workspaceFolderPath) {
         this.worktreeKey = worktreeKey;
         this.filePath = filePath;
         this.relativePath = relativePath;
         this.count = count;
         this.workspaceFolderPath = workspaceFolderPath;
-        this.changeStatus = changeStatus;
         this.kind = "file";
     }
 }
@@ -242,7 +236,7 @@ class PendingTreeProvider {
                 for (const rel of relPaths) {
                     const abs = path.join(w.worktreeRoot, ...rel.split("/").filter(Boolean));
                     const count = w.comments.filter((c) => normRelPath(c.relativePath) === rel).length;
-                    fileInfos.set(rel, { filePath: abs, count, changeStatus: "" });
+                    fileInfos.set(rel, { filePath: abs, count });
                 }
                 const dirEntry = buildDirEntryFromFiles(fileInfos);
                 const worktreeKey = path.normalize(w.worktreeRoot);
@@ -283,7 +277,6 @@ function buildDirEntryFromFiles(files) {
         cursor.files.set(fileName, {
             filePath: path.normalize(info.filePath),
             count: info.count,
-            changeStatus: info.changeStatus,
         });
     }
     return root;
@@ -313,7 +306,7 @@ function toTreeChildren(entry, parentRelative, worktreeKey, workspaceFolderPath,
     for (const name of fileNames) {
         const info = entry.files.get(name);
         const relPath = parentRelative ? `${parentRelative}/${name}` : name;
-        out.push(new FileNode(worktreeKey, info.filePath, relPath, info.count, workspaceFolderPath, info.changeStatus));
+        out.push(new FileNode(worktreeKey, info.filePath, relPath, info.count, workspaceFolderPath));
     }
     return out;
 }
@@ -448,10 +441,10 @@ function fileTreeItem(node) {
     const fileName = path.basename(node.filePath);
     const item = new vscode.TreeItem(fileName, vscode.TreeItemCollapsibleState.None);
     item.resourceUri = vscode.Uri.file(node.filePath);
-    item.iconPath = fileStatusIcon(node.changeStatus, node.count);
-    item.description = fileTrailingIndicators(node);
+    item.iconPath = new vscode.ThemeIcon("comment-discussion", new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"));
+    item.description = commentCountBadge(node.count);
     item.tooltip = fileTooltipText(node);
-    item.contextValue = node.changeStatus === "D" ? "codeReview.file.deleted" : "codeReview.file";
+    item.contextValue = "codeReview.file";
     item.id = `file::${node.worktreeKey}::${normRelPath(node.relativePath)}`;
     item.command = {
         command: "codeReview.openFileDiff",
@@ -460,55 +453,8 @@ function fileTreeItem(node) {
     };
     return item;
 }
-/** Right-aligned column: comment badge (if any), then git letter (last). */
-function fileTrailingIndicators(node) {
-    const badge = commentCountBadge(node.count);
-    const st = node.changeStatus.trim();
-    if (badge && st) {
-        return `${badge}\u202f${st}`;
-    }
-    if (badge) {
-        return badge;
-    }
-    if (st) {
-        return st;
-    }
-    return undefined;
-}
-function fileStatusIcon(changeStatus, commentCount) {
-    const st = changeStatus.trim();
-    if (!st) {
-        if (commentCount > 0) {
-            return new vscode.ThemeIcon("comment-discussion", new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"));
-        }
-        return vscode.ThemeIcon.File;
-    }
-    switch (st) {
-        case "A":
-            return new vscode.ThemeIcon("diff-added", new vscode.ThemeColor("gitDecoration.addedResourceForeground"));
-        case "M":
-            return new vscode.ThemeIcon("diff-modified", new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"));
-        case "D":
-            return new vscode.ThemeIcon("diff-removed", new vscode.ThemeColor("gitDecoration.deletedResourceForeground"));
-        case "R":
-            return new vscode.ThemeIcon("diff-renamed", new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"));
-        case "C":
-            return new vscode.ThemeIcon("diff-modified", new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"));
-        case "U":
-            return new vscode.ThemeIcon("warning", new vscode.ThemeColor("gitDecoration.conflictingResourceForeground"));
-        default:
-            return new vscode.ThemeIcon("diff-modified", new vscode.ThemeColor("gitDecoration.modifiedResourceForeground"));
-    }
-}
 function fileTooltipText(node) {
-    const lines = [];
-    const st = node.changeStatus.trim();
-    if (st) {
-        lines.push(`Git status ${st} vs parent merge-base.`);
-    }
-    else if (node.count > 0) {
-        lines.push("Pending comments only (file not in current diff vs parent).");
-    }
+    const lines = ["Pending comments file."];
     lines.push(node.relativePath);
     if (node.count > 0) {
         lines.push(formatCount(node.count));
