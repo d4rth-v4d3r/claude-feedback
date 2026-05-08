@@ -3,7 +3,7 @@
   "displayName": "Claude Feedback",
   "description": "Native PR-style review threads in the editor and a tree view of pending comments per repo/worktree, sent to Claude Code with one click.",
   "icon": "media/icon.png",
-  "version": "0.0.34",
+  "version": "0.0.35",
   "publisher": "juky-chamale",
   "license": "MIT",
   "repository": {
