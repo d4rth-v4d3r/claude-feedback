@@ -1,4 +1,4 @@
-# Cursor Code Review Helper
+# Claude Feedback
 
 Collect line-level code review comments from the editor, keep them in a sidebar, and copy a formatted batch for async review.
 

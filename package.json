@@ -1,9 +1,9 @@
 {
-  "name": "cursor-code-review-helper",
-  "displayName": "Cursor Code Review Helper",
+  "name": "claude-feedback",
+  "displayName": "Claude Feedback",
   "description": "Native PR-style review threads in the editor and a tree view of pending comments per repo/worktree, sent to Claude Code with one click.",
   "version": "0.0.31",
-  "publisher": "local",
+  "publisher": "juky-chamale",
   "engines": {
     "vscode": "^1.98.0"
   },
@@ -324,7 +324,9 @@
   "scripts": {
     "build": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package",
+    "bump:patch": "npm version patch --no-git-tag-version",
+    "pack:ci": "vsce package --no-dependencies"
   },
   "devDependencies": {
     "@types/node": "^20.12.12",
