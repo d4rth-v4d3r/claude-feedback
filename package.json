@@ -4,6 +4,15 @@
   "description": "Native PR-style review threads in the editor and a tree view of pending comments per repo/worktree, sent to Claude Code with one click.",
   "version": "0.0.32",
   "publisher": "juky-chamale",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/d4rth-v4d3r/claude-feedback.git"
+  },
+  "homepage": "https://github.com/d4rth-v4d3r/claude-feedback#readme",
+  "bugs": {
+    "url": "https://github.com/d4rth-v4d3r/claude-feedback/issues"
+  },
   "engines": {
     "vscode": "^1.98.0"
   },
